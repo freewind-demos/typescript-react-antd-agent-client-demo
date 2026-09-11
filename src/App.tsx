@@ -31,6 +31,45 @@ function buildJsonc(metaLines: string[] | null, body: unknown): string {
   return [...comments, body == null ? 'null' : JSON.stringify(body, null, 2)].join('\n')
 }
 
+// 把多行文本统一缩进 N 个空格
+function indentLines(text: string, size: number): string[] {
+  const pad = ' '.repeat(size)
+  return text.split('\n').map((line) => pad + line)
+}
+
+// 渲染 JSON 正文（缩进 6 层），body 为空时显示 null
+function renderBodyLines(body: unknown): string[] {
+  return body == null ? ['      null'] : indentLines(JSON.stringify(body, null, 2), 6)
+}
+
+// 渲染一条交互为 JSONC：request / response 对象内，元信息（method+URL / status、headers）以 // 注释写在正文前
+function renderInteractionJsonc(item: InteractionRecord): string {
+  const requestLines = item.request
+    ? [
+        `      // ${item.request.method} ${item.request.url}`,
+        '      // headers:',
+        ...Object.entries(item.request.headers).map(([k, v]) => `      //   ${k}: ${v}`),
+        '      //',
+        ...renderBodyLines(item.request.body),
+      ]
+    : ['      null']
+  const responseLines = item.response
+    ? [
+        `      // ${item.response.status} ${item.response.statusText}`,
+        '      // headers:',
+        ...Object.entries(item.response.headers).map(([k, v]) => `      //   ${k}: ${v}`),
+        '      //',
+        ...renderBodyLines(item.response.body),
+      ]
+    : ['      null']
+  return ['  {', '    "request": {', ...requestLines, '    },', '    "response": {', ...responseLines, '    }', '  }'].join('\n')
+}
+
+// 把整个会话渲染成 JSONC 数组：旧项在前、新项在后（持续追加）
+function renderSessionJsonc(interactions: InteractionRecord[]): string {
+  return `[\n${interactions.map(renderInteractionJsonc).join(',\n')}\n]`
+}
+
 export default function App() {
   // ---- 配置区状态 ----
   const [protocol, setProtocol] = useState<Protocol>('anthropic-messages')
@@ -288,15 +327,8 @@ export default function App() {
   const responseJsonc = lastInteraction?.response
     ? buildJsonc([`${lastInteraction.response.status} ${lastInteraction.response.statusText}`, ...headerCommentLines(lastInteraction.response.headers)], lastInteraction.response.body)
     : ''
-  // Tab2 显示整个会话：数组，一项 = 一个请求 + 一个回复（只含协议原生 JSON 正文）
-  const sessionJsonText =
-    interactions.length > 0
-      ? JSON.stringify(
-          interactions.map((item) => ({ request: item.request?.body ?? null, response: item.response?.body ?? null })),
-          null,
-          2,
-        )
-      : ''
+  // Tab2 显示整个会话：JSONC 数组，一项 = 一个请求 + 一个回复（各自的元信息以注释写在正文前）
+  const sessionJsonText = interactions.length > 0 ? renderSessionJsonc(interactions) : ''
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'row', background: '#f5f5f5', boxSizing: 'border-box', padding: 12, gap: 12 }}>
