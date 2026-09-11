@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { AutoComplete, Button, Card, Input, Select, Space, Switch, Tabs, message } from 'antd'
 import { PROTOCOLS, type Protocol } from './protocols'
-import { getHistory, pushHistory } from './config'
+import { getKeyHistoryForUrl, getLatestKeyForUrl, getUrlHistory, recordConfigUsed as saveConfigUsed } from './config'
 
 const { TextArea } = Input
 
@@ -80,12 +80,12 @@ function renderSessionJsonc(records: InteractionRecord[]): string {
 export default function App() {
   // ---- 配置区状态 ----
   const [protocol, setProtocol] = useState<Protocol>('anthropic-messages')
-  // API URL / Key 与协议相互独立：初始取全局历史最近一条（无则留空），切协议时保持不变
-  const [baseUrl, setBaseUrl] = useState(() => getHistory('url')[0] ?? '')
-  const [apiKey, setApiKey] = useState(() => getHistory('key')[0] ?? '')
-  // 全局历史列表（不区分协议，驱动 AutoComplete 下拉）
-  const [urlHistory, setUrlHistory] = useState<string[]>(() => getHistory('url'))
-  const [keyHistory, setKeyHistory] = useState<string[]>(() => getHistory('key'))
+  // URL 与协议无关（全局历史最近一条）；Key 跟随 URL（初始取该 URL 的最近一条）
+  const [baseUrl, setBaseUrlState] = useState(() => getUrlHistory()[0] ?? '')
+  const [apiKey, setApiKey] = useState(() => getLatestKeyForUrl(getUrlHistory()[0] ?? '') ?? '')
+  // 全局 URL 历史 + 当前 URL 的 Key 历史（驱动两个 AutoComplete 下拉）
+  const [urlHistory, setUrlHistory] = useState<string[]>(() => getUrlHistory())
+  const [keyHistory, setKeyHistory] = useState<string[]>(() => getKeyHistoryForUrl(getUrlHistory()[0] ?? ''))
   const [models, setModels] = useState<string[]>([])
   const [model, setModel] = useState<string | undefined>(undefined)
   const [fetching, setFetching] = useState(false)
@@ -118,10 +118,18 @@ export default function App() {
     setModel(undefined)
   }
 
-  // 成功使用后记录配置历史：去重置顶（重复值不新增，只置顶），并刷新下拉列表
+  // 从下拉选中历史 URL 时：带出该 URL 上次成功使用的 Key，并刷新 Key 下拉
+  const onSelectUrl = (value: string) => {
+    setBaseUrlState(value)
+    setApiKey(getLatestKeyForUrl(value) ?? '')
+    setKeyHistory(getKeyHistoryForUrl(value))
+  }
+
+  // 成功使用后记录配置历史：URL 进全局历史，Key 进该 URL 的专属历史
   const recordConfigUsed = (url: string, key: string) => {
-    setUrlHistory(pushHistory('url', url))
-    setKeyHistory(pushHistory('key', key))
+    const saved = saveConfigUsed(url, key)
+    setUrlHistory(saved.urlHistory)
+    setKeyHistory(saved.keyHistory)
   }
 
   // 新会话：生成新 sessionId（新日志文件），清空聊天与日志
@@ -368,7 +376,8 @@ export default function App() {
               />
               <AutoComplete
                 value={baseUrl}
-                onChange={setBaseUrl}
+                onChange={setBaseUrlState}
+                onSelect={onSelectUrl}
                 options={urlHistory.map((h) => ({ value: h }))}
                 placeholder="API URL"
                 size="small"
