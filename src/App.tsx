@@ -37,9 +37,16 @@ function indentLines(text: string, size: number): string[] {
   return text.split('\n').map((line) => pad + line)
 }
 
-// 渲染 JSON 正文（缩进 6 层），body 为空时显示 null
-function renderBodyLines(body: unknown): string[] {
-  return body == null ? ['      null'] : indentLines(JSON.stringify(body, null, 2), 6)
+// 渲染 JSON 正文：对象时字段直接平铺（去掉最外层大括号，缩进对齐注释层），
+// 非对象（null / 数组 / 字符串）作为单个值整体缩进展示
+function renderBodyFieldLines(body: unknown): string[] {
+  if (body == null) return ['      null']
+  if (typeof body === 'object' && !Array.isArray(body)) {
+    // 平铺：取 stringify 的中间行，缩进从 2 层对齐到 6 层
+    const lines = JSON.stringify(body, null, 2).split('\n').slice(1, -1)
+    return lines.length > 0 ? lines.map((line) => ' '.repeat(4) + line) : ['      {}']
+  }
+  return indentLines(JSON.stringify(body, null, 2), 6)
 }
 
 // 渲染一条交互为 JSONC：request / response 对象内，元信息（method+URL / status、headers）以 // 注释写在正文前
@@ -50,7 +57,7 @@ function renderInteractionJsonc(item: InteractionRecord): string {
         '      // headers:',
         ...Object.entries(item.request.headers).map(([k, v]) => `      //   ${k}: ${v}`),
         '      //',
-        ...renderBodyLines(item.request.body),
+        ...renderBodyFieldLines(item.request.body),
       ]
     : ['      null']
   const responseLines = item.response
@@ -59,15 +66,15 @@ function renderInteractionJsonc(item: InteractionRecord): string {
         '      // headers:',
         ...Object.entries(item.response.headers).map(([k, v]) => `      //   ${k}: ${v}`),
         '      //',
-        ...renderBodyLines(item.response.body),
+        ...renderBodyFieldLines(item.response.body),
       ]
     : ['      null']
   return ['  {', '    "request": {', ...requestLines, '    },', '    "response": {', ...responseLines, '    }', '  }'].join('\n')
 }
 
 // 把整个会话渲染成 JSONC 数组：旧项在前、新项在后（持续追加）
-function renderSessionJsonc(interactions: InteractionRecord[]): string {
-  return `[\n${interactions.map(renderInteractionJsonc).join(',\n')}\n]`
+function renderSessionJsonc(records: InteractionRecord[]): string {
+  return `[\n${records.map(renderInteractionJsonc).join(',\n')}\n]`
 }
 
 export default function App() {
@@ -94,8 +101,10 @@ export default function App() {
   const [sessionId, setSessionId] = useState(() => crypto.randomUUID())
   // 当前会话的 verbose 原样日志文本（初始从文件全量拉取，之后实时追加）
   const [logText, setLogText] = useState('')
-  // 当前会话的交互记录列表（一项 = 一个请求 + 一个回复，含 HTTP 元信息与协议 JSON 正文）
-  const [interactions, setInteractions] = useState<InteractionRecord[]>([])
+  // Tab2「会话」的显示数据：完整交互记录数组（一项 = 一个请求 + 一个回复）
+  const [sessionJson, setSessionJson] = useState<InteractionRecord[]>([])
+  // Tab1「请求/响应」的显示数据：只保留最新一次交互（与 sessionJson 独立持有，清空互不影响）
+  const [currentPair, setCurrentPair] = useState<InteractionRecord | null>(null)
   const logBoxRef = useRef<HTMLDivElement>(null)
   const jsonBoxRef = useRef<HTMLDivElement>(null)
 
@@ -124,14 +133,14 @@ export default function App() {
     setSessionId(crypto.randomUUID())
     setMessages([])
     setLogText('')
-    setInteractions([])
+    setSessionJson([])
+    setCurrentPair(null)
   }
 
-  // 清空当前会话的日志显示：之后只显示新产生的日志
-  const clearLogs = () => {
-    setLogText('')
-    setInteractions([])
-  }
+  // 三个 Tab 各自的清空：只清自己的显示数据，互不影响
+  const clearTab1 = () => setCurrentPair(null) // Tab1「请求/响应」
+  const clearTab2 = () => setSessionJson([]) // Tab2「会话」
+  const clearTab3 = () => setLogText('') // Tab3「verbose」
 
   // sessionId 变化时（首次进入 / 新会话）：从 Server 全量拉取该会话的 verbose 日志与交互记录
   useEffect(() => {
@@ -141,7 +150,11 @@ export default function App() {
       .catch(() => {})
     fetch(`/api/logs/${sessionId}/json`)
       .then((res) => (res.ok ? res.json() : null))
-      .then((data) => setInteractions(Array.isArray(data) ? data : []))
+      .then((data) => {
+        const list = Array.isArray(data) ? data : []
+        setSessionJson(list)
+        setCurrentPair(list.length > 0 ? list[list.length - 1] : null)
+      })
       .catch(() => {})
   }, [sessionId])
 
@@ -156,27 +169,28 @@ export default function App() {
         if (typeof data.text === 'string') {
           setLogText((prev) => prev + data.text + '\n\n')
         }
-        // 新请求：追加一条交互记录（带元信息与请求体），响应暂空
+        // 新请求：追加一条交互记录到 Tab2（带元信息与请求体），响应暂空；Tab1 同步为最新一条
         if (data.requestJson !== undefined) {
-          setInteractions((prev) => [
-            ...prev,
-            { request: { method: data.method, url: data.url, headers: data.headers ?? {}, body: data.requestJson }, response: null },
-          ])
+          const newItem: InteractionRecord = { request: { method: data.method, url: data.url, headers: data.headers ?? {}, body: data.requestJson }, response: null }
+          setSessionJson((prev) => [...prev, newItem])
+          setCurrentPair(newItem)
         }
-        // 收到响应头：记录 status 与 headers
+        // 收到响应头：记录 status 与 headers（更新最后一条的 response）
         if (data.type === 'response') {
-          setInteractions((prev) => {
+          const patch = (prev: InteractionRecord[]) => {
             if (prev.length === 0) return prev
             const next = [...prev]
             const last = next[next.length - 1]
             next[next.length - 1] = { ...last, response: { status: data.status, statusText: data.statusText, headers: data.headers ?? {}, body: last.response?.body ?? null } }
             return next
-          })
+          }
+          setSessionJson(patch)
+          setCurrentPair((prev) => (prev ? { ...prev, response: { status: data.status, statusText: data.statusText, headers: data.headers ?? {}, body: prev.response?.body ?? null } } : prev))
         }
         // 聚合后的完整响应正文：更新最后一条交互的 response.body
         if (data.currentResponse !== undefined && data.currentResponse !== null) {
           const aggregated = data.currentResponse
-          setInteractions((prev) => {
+          const patch = (prev: InteractionRecord[]) => {
             if (prev.length === 0) return prev
             const next = [...prev]
             const last = next[next.length - 1]
@@ -185,7 +199,13 @@ export default function App() {
               response: { status: last.response?.status ?? 0, statusText: last.response?.statusText ?? '', headers: last.response?.headers ?? {}, body: aggregated },
             }
             return next
-          })
+          }
+          setSessionJson(patch)
+          setCurrentPair((prev) =>
+            prev
+              ? { ...prev, response: { status: prev.response?.status ?? 0, statusText: prev.response?.statusText ?? '', headers: prev.response?.headers ?? {}, body: aggregated } }
+              : prev,
+          )
         }
       } catch {
         // 心跳等无法解析的内容直接忽略
@@ -203,7 +223,7 @@ export default function App() {
   useEffect(() => {
     const el = jsonBoxRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [interactions])
+  }, [sessionJson])
 
   // Fetch Models：调用当前协议的模型接口，返回模型列表
   const fetchModels = async () => {
@@ -319,16 +339,15 @@ export default function App() {
     }
   }
 
-  // Tab1 显示"最新一次"请求/响应，元信息（method/URL/status/headers）以 // 注释写在 JSON 前（JSONC）
-  const lastInteraction = interactions.length > 0 ? interactions[interactions.length - 1] : null
-  const requestJsonc = lastInteraction?.request
-    ? buildJsonc([`${lastInteraction.request.method} ${lastInteraction.request.url}`, ...headerCommentLines(lastInteraction.request.headers)], lastInteraction.request.body)
+  // Tab1 显示"最新一次"请求/响应（来自独立数据 currentPair），元信息以 // 注释写在 JSON 前（JSONC）
+  const requestJsonc = currentPair?.request
+    ? buildJsonc([`${currentPair.request.method} ${currentPair.request.url}`, ...headerCommentLines(currentPair.request.headers)], currentPair.request.body)
     : ''
-  const responseJsonc = lastInteraction?.response
-    ? buildJsonc([`${lastInteraction.response.status} ${lastInteraction.response.statusText}`, ...headerCommentLines(lastInteraction.response.headers)], lastInteraction.response.body)
+  const responseJsonc = currentPair?.response
+    ? buildJsonc([`${currentPair.response.status} ${currentPair.response.statusText}`, ...headerCommentLines(currentPair.response.headers)], currentPair.response.body)
     : ''
   // Tab2 显示整个会话：JSONC 数组，一项 = 一个请求 + 一个回复（各自的元信息以注释写在正文前）
-  const sessionJsonText = interactions.length > 0 ? renderSessionJsonc(interactions) : ''
+  const sessionJsonText = sessionJson.length > 0 ? renderSessionJsonc(sessionJson) : ''
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'row', background: '#f5f5f5', boxSizing: 'border-box', padding: 12, gap: 12 }}>
@@ -439,14 +458,19 @@ export default function App() {
         <Tabs
           className="logs-tabs"
           defaultActiveKey="current"
-          tabBarExtraContent={{ right: <Button size="small" onClick={clearLogs}>清空</Button> }}
           items={[
-            // Tab1（默认）：上下两个区域，各显示最新一次的 Request / Response（JSONC 格式：元信息为注释）
+            // Tab1（默认）：上下两个区域，各显示最新一次的 Request / Response（JSONC：元信息为注释）
             {
               key: 'current',
               label: '请求/响应',
               children: (
                 <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {/* 本 Tab 自己的清空（只清 Tab1 显示，不影响其他 Tab） */}
+                  <div style={{ flex: 'none', display: 'flex', justifyContent: 'flex-end' }}>
+                    <Button size="small" onClick={clearTab1}>
+                      清空
+                    </Button>
+                  </div>
                   {/* Request 区：最新一次请求 */}
                   <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
                     <div style={{ flex: 'none', color: '#888888', fontSize: 11, marginBottom: 4 }}>Request（最新一次）</div>
@@ -464,16 +488,23 @@ export default function App() {
                 </div>
               ),
             },
-            // Tab2：整个会话 —— 数组形式，一个请求配一个回复（协议原生 JSON）
+            // Tab2：整个会话 —— JSONC 数组，一个请求配一个回复
             {
               key: 'session',
               label: '会话',
               children: (
-                <div
-                  ref={jsonBoxRef}
-                  style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre', wordBreak: 'break-all' }}
-                >
-                  {sessionJsonText || '（暂无会话。这里以数组形式展示整个会话：一项 = 一个请求 + 一个回复，均为协议原生的 JSON）'}
+                <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <div style={{ flex: 'none', display: 'flex', justifyContent: 'flex-end' }}>
+                    <Button size="small" onClick={clearTab2}>
+                      清空
+                    </Button>
+                  </div>
+                  <div
+                    ref={jsonBoxRef}
+                    style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre', wordBreak: 'break-all' }}
+                  >
+                    {sessionJsonText || '（暂无会话。这里以数组形式展示整个会话：一项 = 一个请求 + 一个回复，均为协议原生的 JSON）'}
+                  </div>
                 </div>
               ),
             },
@@ -482,11 +513,18 @@ export default function App() {
               key: 'verbose',
               label: 'verbose',
               children: (
-                <div
-                  ref={logBoxRef}
-                  style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
-                >
-                  {logText || '（暂无日志。发送消息或 Fetch Models 后，这里会原样显示所有发出的请求与收到的响应，流式时每个 SSE 分片单独一条）'}
+                <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <div style={{ flex: 'none', display: 'flex', justifyContent: 'flex-end' }}>
+                    <Button size="small" onClick={clearTab3}>
+                      清空
+                    </Button>
+                  </div>
+                  <div
+                    ref={logBoxRef}
+                    style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
+                  >
+                    {logText || '（暂无日志。发送消息或 Fetch Models 后，这里会原样显示所有发出的请求与收到的响应，流式时每个 SSE 分片单独一条）'}
+                  </div>
                 </div>
               ),
             },
