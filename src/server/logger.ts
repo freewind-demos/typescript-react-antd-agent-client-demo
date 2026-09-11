@@ -1,10 +1,10 @@
 // 日志写入器：把中间件产生的日志事件落盘到文件，并实时广播给前端
-// 每个会话（sessionId）一份日志：
-//   logs/<sessionId>.log         —— verbose 原样日志（每条事件完整原始内容）
-//   logs/<sessionId>.summary.log —— 整合摘要（协议层可读内容，不含底层细节）
-// 前端日志面板分两个 Tab 展示：默认"整合"（summary），可选"verbose"（原样）。
+// 每个会话（sessionId）两份文件：
+//   logs/<sessionId>.log  —— verbose 原样日志（每条事件完整原始内容）
+//   logs/<sessionId>.json —— 整个会话的结构化 JSON（request 的 headers/body、response 的 status/headers、提取的回复文本）
+// 前端日志面板两个 Tab：默认"JSON"（会话结构），"verbose"（原样底层日志）。
 
-import { appendFileSync, mkdirSync, readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { LogEvent } from './middleware.js'
 import type { Protocol } from './clients.js'
@@ -14,6 +14,10 @@ export const LOGS_DIR = join(process.cwd(), 'logs')
 
 // 一个订阅中的 SSE 客户端：用 send 推数据
 type SseClient = { send: (text: string) => void }
+
+// 会话里按时间顺序收集的协议原生 JSON 列表：
+// 每次请求的请求体 JSON，以及响应里每个事件 JSON，原样排列（不含 HTTP headers 等）
+export type ProtocolJson = unknown
 
 // 把一条日志事件格式化成 verbose 文本（原样展示，区分方向）
 export function formatLogEvent(event: LogEvent): string {
@@ -36,101 +40,42 @@ export function formatLogEvent(event: LogEvent): string {
   }
 }
 
-// 尝试把请求体里的 model 和 messages 提取成一行摘要（解析失败返回空）
-function extractRequestSummary(bodyText: string): string {
+// 从一条原始文本里提取协议原生的 JSON：请求体（整段 JSON）或响应事件（每个 data: 行的 JSON）。
+// 这些就是协议本身的内容，不含任何 HTTP 层包装。
+function extractProtocolJsons(raw: string): unknown[] {
+  // 整段是一个 JSON（非流式响应体、请求体）
   try {
-    const body = JSON.parse(bodyText) as { model?: string; messages?: Array<{ role?: string; content?: unknown }> }
-    const parts: string[] = []
-    if (body.model) {
-      parts.push(`model: ${body.model}`)
-    }
-    if (Array.isArray(body.messages)) {
-      const brief = body.messages.map((m) => `${m.role ?? '?'}: ${String(m.content ?? '').slice(0, 60)}`).join(' | ')
-      parts.push(brief)
-    }
-    return parts.join('\n  ')
+    return [JSON.parse(raw)]
   } catch {
-    return ''
+    // 不是整段 JSON，继续按 SSE 行解析
   }
-}
-
-// 从一条原始 chunk（可能是 SSE 分片，也可能是非流式的整段 JSON）里提取协议文本。
-// 提取不到（如 event: message_start 之类的元事件）返回 null，摘要里就不展示。
-function extractChunkText(protocol: Protocol, raw: string): string | null {
-  // 尝试整体解析：非流式响应（整段 JSON）或单行 JSON
-  try {
-    const parsed = JSON.parse(raw)
-    if (protocol === 'anthropic-messages') {
-      const content = parsed.content
-      if (Array.isArray(content)) {
-        return content.filter((b: { type?: string; text?: string }) => b.type === 'text' && typeof b.text === 'string').map((b: { text: string }) => b.text).join('')
-      }
-    } else if (protocol === 'openai-chat-completions') {
-      const msg = parsed.choices?.[0]?.message?.content
-      if (typeof msg === 'string') return msg
-    } else if (protocol === 'openai-responses') {
-      if (typeof parsed.output_text === 'string') return parsed.output_text
-    }
-  } catch {
-    // 不是单块 JSON，继续按 SSE 逐行解析
-  }
-  // SSE 分片：逐行找 data: 开头的 JSON
+  const result: unknown[] = []
   for (const line of raw.split('\n')) {
     if (!line.startsWith('data: ')) continue
+    const payload = line.slice(6).trim()
+    // SSE 结束标记不是协议内容
+    if (payload === '[DONE]') continue
     try {
-      const d = JSON.parse(line.slice(6))
-      if (protocol === 'anthropic-messages') {
-        if (d.type === 'content_block_delta' && d.delta?.type === 'text_delta' && typeof d.delta.text === 'string') {
-          return d.delta.text
-        }
-      } else if (protocol === 'openai-chat-completions') {
-        const content = d.choices?.[0]?.delta?.content
-        if (typeof content === 'string' && content) return content
-      } else if (protocol === 'openai-responses') {
-        if (d.type === 'response.output_text.delta' && typeof d.delta === 'string') return d.delta
-      }
+      result.push(JSON.parse(payload))
     } catch {
-      // 单行解析失败，跳过
+      // 无法解析的行跳过
     }
   }
-  return null
+  return result
 }
 
-// 把一条日志事件生成一行整合摘要（协议层可读；非文本事件返回空串不展示）
-function summarizeEvent(event: LogEvent, protocol: Protocol): string {
-  const time = new Date(event.timestamp).toLocaleTimeString('zh-CN', { hour12: false })
-  switch (event.type) {
-    case 'request': {
-      const brief = extractRequestSummary(event.bodyText)
-      const head = `[${time}] → ${event.method} ${event.url}`
-      return brief ? `${head}\n  ${brief}` : head
-    }
-    case 'response': {
-      const ctype = event.headers['content-type'] ?? ''
-      return `[${time}] ← ${event.status}${ctype ? ` ${ctype.split(';')[0]}` : ''}`
-    }
-    case 'chunk': {
-      const text = extractChunkText(protocol, event.text)
-      return text ? `[${time}] 文本: ${text}` : ''
-    }
-    case 'error':
-      return `[${time}] ✗ ${event.message}`
-    case 'end':
-      return `[${time}] ✓ 完成`
-  }
-}
-
-// 日志管理器：维护所有会话的 verbose 日志文件、摘要文件与 SSE 订阅者
+// 日志管理器：维护会话的 verbose 文件、协议 JSON（内存 + 落盘）与 SSE 订阅者
 export class LogManager {
-  // 每个 sessionId 对应的 verbose 文件路径（静态小查找表）
+  // 每个 sessionId 对应的 verbose 文件路径
   private filePaths: Record<string, string> = {}
-  // 每个 sessionId 对应的摘要文件路径
-  private summaryPaths: Record<string, string> = {}
-  // 当前在线的 SSE 订阅者（运行时动态增删，用 Set）
+  // 每个 sessionId 对应的 JSON 文件路径
+  private jsonPaths: Record<string, string> = {}
+  // 每个 sessionId 累积的协议原生 JSON 列表（内存态，供增量更新后整体落盘）
+  private sessionProtocolJsons: Record<string, ProtocolJson[]> = {}
+  // 当前在线的 SSE 订阅者
   private subscribers = new Set<SseClient>()
 
   constructor() {
-    // 确保日志目录存在
     mkdirSync(LOGS_DIR, { recursive: true })
   }
 
@@ -139,32 +84,40 @@ export class LogManager {
     return sessionId.replace(/[^a-zA-Z0-9_-]/g, '_')
   }
 
-  // 某个会话追加一条日志事件：写 verbose 文件 + 写摘要文件 + 广播给所有订阅者
-  append(sessionId: string, event: LogEvent, protocol?: Protocol): void {
+  // 某个会话追加一条日志事件：更新 verbose 文件与协议 JSON，并广播给所有订阅者
+  append(sessionId: string, event: LogEvent, _protocol?: Protocol): void {
     // ---- verbose 原样日志 ----
     let filePath = this.filePaths[sessionId]
     if (!filePath) {
       filePath = join(LOGS_DIR, `${this.safeName(sessionId)}.log`)
       this.filePaths[sessionId] = filePath
     }
-    appendFileSync(filePath, `${formatLogEvent(event)}\n\n`)
+    // writeFileSync 追加（a 标志）写入一行块
+    writeFileSync(filePath, `${formatLogEvent(event)}\n\n`, { flag: 'a' })
 
-    // ---- 整合摘要（需要协议才能从 chunk 里提取文本）----
-    let summaryText = ''
-    if (protocol) {
-      summaryText = summarizeEvent(event, protocol)
-      if (summaryText) {
-        let summaryPath = this.summaryPaths[sessionId]
-        if (!summaryPath) {
-          summaryPath = join(LOGS_DIR, `${this.safeName(sessionId)}.summary.log`)
-          this.summaryPaths[sessionId] = summaryPath
-        }
-        appendFileSync(summaryPath, `${summaryText}\n`)
-      }
+    // ---- 收集本次事件里的协议原生 JSON ----
+    // 请求事件：请求体就是协议 JSON；chunk 事件：响应里每个 data: 行是协议事件 JSON
+    let newProtocolJsons: ProtocolJson[] = []
+    if (event.type === 'request') {
+      newProtocolJsons = extractProtocolJsons(event.bodyText)
+    } else if (event.type === 'chunk') {
+      newProtocolJsons = extractProtocolJsons(event.text)
     }
 
-    // ---- 广播给前端：SSE 格式 data: JSON\n\n ----
-    const payload = `data: ${JSON.stringify({ ...event, text: formatLogEvent(event), summary: summaryText, sessionId })}\n\n`
+    // ---- 累积到会话协议 JSON 列表并落盘（覆盖写，保持与内存一致） ----
+    const list = this.sessionProtocolJsons[sessionId] ?? (this.sessionProtocolJsons[sessionId] = [])
+    if (newProtocolJsons.length > 0) {
+      list.push(...newProtocolJsons)
+      let jsonPath = this.jsonPaths[sessionId]
+      if (!jsonPath) {
+        jsonPath = join(LOGS_DIR, `${this.safeName(sessionId)}.json`)
+        this.jsonPaths[sessionId] = jsonPath
+      }
+      writeFileSync(jsonPath, JSON.stringify(list, null, 2))
+    }
+
+    // ---- 广播给前端：SSE 格式 data: JSON\n\n（带本次新增的协议 JSON，前端直接追加） ----
+    const payload = `data: ${JSON.stringify({ ...event, text: formatLogEvent(event), protocolJsons: newProtocolJsons, sessionId })}\n\n`
     for (const client of this.subscribers) {
       client.send(payload)
     }
@@ -179,10 +132,10 @@ export class LogManager {
     }
   }
 
-  // 读取某个会话的整合摘要文件内容
-  readSummaryFile(sessionId: string): string | null {
+  // 读取某个会话累积的协议 JSON 列表
+  readJsonFile(sessionId: string): ProtocolJson[] | null {
     try {
-      return readFileSync(join(LOGS_DIR, `${this.safeName(sessionId)}.summary.log`), 'utf-8')
+      return JSON.parse(readFileSync(join(LOGS_DIR, `${this.safeName(sessionId)}.json`), 'utf-8')) as ProtocolJson[]
     } catch {
       return null
     }

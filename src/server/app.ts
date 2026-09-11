@@ -115,14 +115,14 @@ export function buildApp(): express.Express {
     })
   })
 
-  // 读取某个会话的整合摘要文件内容（日志面板"整合"Tab）
-  app.get('/api/logs/:sessionId/summary', (req, res) => {
-    const content = logManager.readSummaryFile(req.params.sessionId)
-    if (content === null) {
-      res.status(404).json({ error: 'summary file not found' })
+  // 读取某个会话的结构化 JSON（日志面板"JSON"Tab 全量恢复用）
+  app.get('/api/logs/:sessionId/json', (req, res) => {
+    const data = logManager.readJsonFile(req.params.sessionId)
+    if (data === null) {
+      res.status(404).json({ error: 'json log not found' })
       return
     }
-    res.type('text/plain').send(content)
+    res.json(data)
   })
 
   // 读取某个会话的完整日志文件内容（换会话即换 sessionId）

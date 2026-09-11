@@ -35,10 +35,10 @@ export default function App() {
   const [sessionId, setSessionId] = useState(() => crypto.randomUUID())
   // 当前会话的 verbose 原样日志文本（初始从文件全量拉取，之后实时追加）
   const [logText, setLogText] = useState('')
-  // 当前会话的整合摘要文本（协议层可读内容，日志面板"整合"Tab）
-  const [summaryText, setSummaryText] = useState('')
+  // 当前会话累积的协议原生 JSON 列表（请求体 + 响应事件，日志面板"JSON"Tab 展示）
+  const [sessionJson, setSessionJson] = useState<unknown[]>([])
   const logBoxRef = useRef<HTMLDivElement>(null)
-  const summaryBoxRef = useRef<HTMLDivElement>(null)
+  const jsonBoxRef = useRef<HTMLDivElement>(null)
 
   // 当前协议对应的元数据（Endpoint 等）
   const meta = PROTOCOLS.find((p) => p.value === protocol)!
@@ -65,24 +65,24 @@ export default function App() {
     setSessionId(crypto.randomUUID())
     setMessages([])
     setLogText('')
-    setSummaryText('')
+    setSessionJson([])
   }
 
   // 清空当前会话的日志显示：之后只显示新产生的日志
   const clearLogs = () => {
     setLogText('')
-    setSummaryText('')
+    setSessionJson([])
   }
 
-  // sessionId 变化时（首次进入 / 新会话）：从 Server 全量拉取该会话的日志文件与整合摘要
+  // sessionId 变化时（首次进入 / 新会话）：从 Server 全量拉取该会话的 verbose 日志与结构化 JSON
   useEffect(() => {
     fetch(`/api/logs/${sessionId}`)
       .then((res) => (res.ok ? res.text() : ''))
       .then((text) => setLogText(text))
       .catch(() => {})
-    fetch(`/api/logs/${sessionId}/summary`)
-      .then((res) => (res.ok ? res.text() : ''))
-      .then((text) => setSummaryText(text))
+    fetch(`/api/logs/${sessionId}/json`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => setSessionJson(Array.isArray(data) ? data : []))
       .catch(() => {})
   }, [sessionId])
 
@@ -97,8 +97,9 @@ export default function App() {
         if (typeof data.text === 'string') {
           setLogText((prev) => prev + data.text + '\n\n')
         }
-        if (typeof data.summary === 'string' && data.summary) {
-          setSummaryText((prev) => prev + data.summary + '\n')
+        // 追加本次事件里的协议原生 JSON（Server 已解析好）
+        if (Array.isArray(data.protocolJsons) && data.protocolJsons.length > 0) {
+          setSessionJson((prev) => [...prev, ...data.protocolJsons])
         }
       } catch {
         // 心跳等无法解析的内容直接忽略
@@ -107,16 +108,16 @@ export default function App() {
     return () => es.close()
   }, [sessionId])
 
-  // 日志面板自动滚到底部：verbose 与整合摘要各自滚动
+  // 日志面板自动滚到底部：verbose 与 JSON 各自滚动
   useEffect(() => {
     const el = logBoxRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [logText])
 
   useEffect(() => {
-    const el = summaryBoxRef.current
+    const el = jsonBoxRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [summaryText])
+  }, [sessionJson])
 
   // Fetch Models：调用当前协议的模型接口，返回模型列表
   const fetchModels = async () => {
@@ -332,25 +333,29 @@ export default function App() {
         {/* Tabs 撑满高度：antd Tabs 默认不撑满，用类名控制子元素 */}
         <style>{`
           .logs-tabs { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0 12px; }
-          .logs-tabs .ant-tabs-content-holder { flex: 1; min-height: 0; }
-          .logs-tabs .ant-tabs-content { height: 100%; }
-          .logs-tabs .ant-tabs-tabpane { height: 100%; }
+          .logs-tabs .ant-tabs-body-holder { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+          .logs-tabs .ant-tabs-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+          .logs-tabs .ant-tabs-content { min-height: 0; }
+          .logs-tabs .ant-tabs-content-active { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+          .logs-tabs .ant-tabs-content-active > div { flex: 1; min-height: 0; display: flex; }
         `}</style>
         <Tabs
           className="logs-tabs"
-          defaultActiveKey="summary"
+          defaultActiveKey="json"
           tabBarExtraContent={{ right: <Button size="small" onClick={clearLogs}>清空</Button> }}
           items={[
-            // 整合 Tab：协议层可读内容（请求摘要 / 响应状态 / 提取的文本）
+            // JSON Tab（默认）：整个会话的结构化 JSON（请求 headers/body、响应 status/headers、完整回复文本）
             {
-              key: 'summary',
-              label: '整合',
+              key: 'json',
+              label: 'JSON',
               children: (
                 <div
-                  ref={summaryBoxRef}
-                  style={{ height: '100%', overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
+                  ref={jsonBoxRef}
+                  style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre', wordBreak: 'break-all' }}
                 >
-                  {summaryText || '（暂无整合日志。发送消息后这里显示协议层摘要：请求模型/消息、响应状态、模型回复文本）'}
+                  {sessionJson.length > 0
+                    ? JSON.stringify(sessionJson, null, 2)
+                    : '（暂无协议 JSON。发送消息或 Fetch Models 后，这里按顺序展示整个会话里协议原生的 JSON：每次请求的请求体、响应的每个事件，不含 HTTP headers 等杂项）'}
                 </div>
               ),
             },
@@ -361,7 +366,7 @@ export default function App() {
               children: (
                 <div
                   ref={logBoxRef}
-                  style={{ height: '100%', overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
+                  style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
                 >
                   {logText || '（暂无日志。发送消息或 Fetch Models 后，这里会原样显示所有发出的请求与收到的响应，流式时每个 SSE 分片单独一条）'}
                 </div>
