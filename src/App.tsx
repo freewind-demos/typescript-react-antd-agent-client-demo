@@ -360,20 +360,22 @@ export default function App() {
         {/* 顶部配置区：三行布局 */}
         <Card size="small" title="Agent Client 配置">
           <Space direction="vertical" size="small" style={{ width: '100%' }}>
-            {/* 第一行：协议 + API URL + API Key */}
+            {/* 第一行：协议（无标签）+ API URL + API Key，全部 small */}
             <Space wrap>
-              <span>协议</span>
               <Select
                 value={protocol}
                 onChange={onProtocolChange}
                 options={PROTOCOLS.map((p) => ({ value: p.value, label: p.label }))}
-                style={{ width: 220 }}
+                size="small"
+                popupMatchSelectWidth={false}
+                style={{ width: 170 }}
               />
               <AutoComplete
                 value={baseUrl}
                 onChange={setBaseUrl}
                 options={urlHistory.map((h) => ({ value: h }))}
                 placeholder="API URL"
+                size="small"
                 style={{ width: 320 }}
               />
               <AutoComplete
@@ -381,7 +383,8 @@ export default function App() {
                 onChange={setApiKey}
                 options={keyHistory.map((h) => ({ value: h }))}
                 placeholder="API Key"
-                style={{ width: 260 }}
+                size="small"
+                style={{ width: 180 }}
               />
             </Space>
             {/* 第二行：模型选择 + Fetch Models（在右） */}
@@ -391,17 +394,20 @@ export default function App() {
                 onChange={setModel}
                 options={models.map((m) => ({ value: m }))}
                 placeholder="选择或输入模型"
+                size="small"
                 style={{ width: 260 }}
               />
-              <Button onClick={fetchModels} loading={fetching}>
+              <Button size="small" onClick={fetchModels} loading={fetching}>
                 Fetch Models
               </Button>
             </Space>
             {/* 第三行：流式开关 + 新会话 */}
             <Space wrap>
               <span>流式</span>
-              <Switch checked={stream} onChange={setStream} />
-              <Button onClick={newSession}>新会话</Button>
+              <Switch size="small" checked={stream} onChange={setStream} />
+              <Button size="small" onClick={newSession}>
+                新会话
+              </Button>
             </Space>
           </Space>
         </Card>
@@ -442,6 +448,7 @@ export default function App() {
               onChange={(e) => setInput(e.target.value)}
               placeholder="输入消息，Enter 发送，Shift+Enter 换行"
               autoSize={{ minRows: 1, maxRows: 4 }}
+              size="small"
               onPressEnter={(e) => {
                 if (!e.shiftKey) {
                   e.preventDefault()
@@ -449,7 +456,7 @@ export default function App() {
                 }
               }}
             />
-            <Button type="primary" onClick={handleSend} loading={sending}>
+            <Button type="primary" size="small" onClick={handleSend} loading={sending}>
               发送
             </Button>
           </div>
@@ -470,6 +477,7 @@ export default function App() {
         <Tabs
           className="logs-tabs"
           defaultActiveKey="current"
+          size="small"
           items={[
             // Tab1（默认）：上下两个区域，各显示最新一次的 Request / Response（JSONC：元信息为注释）
             {
