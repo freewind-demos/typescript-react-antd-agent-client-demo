@@ -384,13 +384,12 @@ export default function App() {
             <Button onClick={fetchModels} loading={fetching}>
               Fetch Models
             </Button>
-            <Select
-              placeholder="选择模型"
+            <AutoComplete
               value={model}
               onChange={setModel}
-              options={models.map((m) => ({ value: m, label: m }))}
+              options={models.map((m) => ({ value: m }))}
+              placeholder="选择或输入模型"
               style={{ width: 260 }}
-              showSearch
             />
             <span>流式</span>
             <Switch checked={stream} onChange={setStream} />
