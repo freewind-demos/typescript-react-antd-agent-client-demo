@@ -204,7 +204,7 @@ export default function App() {
               style={{ width: 220 }}
             />
             <Input placeholder="API URL" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} style={{ width: 320 }} />
-            <Input.Password placeholder="API Key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} style={{ width: 260 }} />
+            <Input placeholder="API Key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} style={{ width: 260 }} />
             <Button onClick={fetchModels} loading={fetching}>
               Fetch Models
             </Button>
