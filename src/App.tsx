@@ -376,7 +376,7 @@ export default function App() {
                 onChange={onProtocolChange}
                 options={PROTOCOLS.map((p) => ({ value: p.value, label: p.label }))}
                 size="small"
-                popupMatchSelectWidth={true}
+                popupMatchSelectWidth={false}
                 style={{ width: 170 }}
               />
               <AutoComplete
@@ -386,6 +386,7 @@ export default function App() {
                 options={urlHistory.map((h) => ({ value: h }))}
                 placeholder="API URL"
                 size="small"
+                popupMatchSelectWidth={false}
                 style={{ width: 320 }}
               />
               <AutoComplete
@@ -394,6 +395,7 @@ export default function App() {
                 options={keyHistory.map((h) => ({ value: h }))}
                 placeholder="API Key"
                 size="small"
+                popupMatchSelectWidth={false}
                 style={{ width: 180 }}
               />
             </Space>
@@ -406,6 +408,7 @@ export default function App() {
                 placeholder="选择或输入模型"
                 size="small"
                 style={{ width: 200 }}
+                popupMatchSelectWidth={false}
               />
               <Button size="small" onClick={fetchModels} loading={fetching}>
                 Fetch Models
