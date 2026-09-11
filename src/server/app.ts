@@ -5,7 +5,7 @@
 // 两种方式路由完全一致（都带 /api 前缀）。
 
 import express from 'express'
-import { chatWithProtocol, listModels, type ChatRequest, type ChatResult, type Protocol } from './clients.js'
+import { chatWithProtocol, listModelsWithFallback, type ChatRequest, type ChatResult, type Protocol } from './clients.js'
 import { LogManager } from './logger.js'
 import type { LogEvent } from './middleware.js'
 
@@ -72,8 +72,9 @@ function handleModels(protocol: Protocol) {
     try {
       // Fetch Models 请求同样记录日志（有 sessionId 时），方便看到模型接口的原始交互
       const onEvent = sessionId ? (event: LogEvent) => logManager.append(sessionId, event, protocol) : () => {}
-      const models = await listModels(protocol, baseUrl, apiKey, onEvent)
-      res.json({ models })
+      // 自动重试：依次尝试从 baseUrl 上溯的几个候选地址，兼容"模型列表与聊天端点路径不同"的上游
+      const { models, usedBaseUrl } = await listModelsWithFallback(protocol, baseUrl, apiKey, onEvent)
+      res.json({ models, usedBaseUrl })
     } catch (error) {
       res.status(500).json({ error: String(error) })
     }

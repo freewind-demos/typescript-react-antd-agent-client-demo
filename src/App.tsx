@@ -243,6 +243,10 @@ export default function App() {
         throw new Error(data.error || `HTTP ${res.status}`)
       }
       setModels(data.models ?? [])
+      // 如果实际使用的地址与填写的不一致（自动上溯过），提示用户，避免困惑
+      if (data.usedBaseUrl && data.usedBaseUrl !== baseUrl) {
+        message.info(`模型列表来自 ${data.usedBaseUrl}`)
+      }
       // 成功拉到模型后记录本次使用的配置到历史（去重置顶）
       recordConfigUsed(protocol, baseUrl, apiKey)
       // 拿到列表后默认选中第一个
