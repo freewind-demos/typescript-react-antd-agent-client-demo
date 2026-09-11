@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { AutoComplete, Button, Card, Input, Select, Space, Switch, Tabs, message } from 'antd'
 import { PROTOCOLS, type Protocol } from './protocols'
-import { getKeyHistoryForUrl, getLatestKeyForUrl, getUrlHistory, recordConfigUsed as saveConfigUsed } from './config'
+import { getKeyHistoryForUrl, getLatestKeyForUrl, getModelHistory, getUrlHistory, recordConfigUsed as saveConfigUsed } from './config'
 
 const { TextArea } = Input
 
@@ -86,6 +86,8 @@ export default function App() {
   // 全局 URL 历史 + 当前 URL 的 Key 历史（驱动两个 AutoComplete 下拉）
   const [urlHistory, setUrlHistory] = useState<string[]>(() => getUrlHistory())
   const [keyHistory, setKeyHistory] = useState<string[]>(() => getKeyHistoryForUrl(getUrlHistory()[0] ?? ''))
+  // 全局模型历史（用过的模型，与协议无关），与 Fetch 到的模型合并去重后作为下拉选项
+  const [modelHistory, setModelHistory] = useState<string[]>(() => getModelHistory())
   const [models, setModels] = useState<string[]>([])
   const [model, setModel] = useState<string | undefined>(undefined)
   const [fetching, setFetching] = useState(false)
@@ -125,11 +127,12 @@ export default function App() {
     setKeyHistory(getKeyHistoryForUrl(value))
   }
 
-  // 成功使用后记录配置历史：URL 进全局历史，Key 进该 URL 的专属历史
-  const recordConfigUsed = (url: string, key: string) => {
-    const saved = saveConfigUsed(url, key)
+  // 成功使用后记录配置历史：URL 进全局历史，Key 进该 URL 的专属历史，模型进全局模型历史
+  const recordConfigUsed = (url: string, key: string, usedModel?: string) => {
+    const saved = saveConfigUsed(url, key, usedModel)
     setUrlHistory(saved.urlHistory)
     setKeyHistory(saved.keyHistory)
+    setModelHistory(saved.modelHistory)
   }
 
   // 新会话：生成新 sessionId（新日志文件），清空聊天与日志
@@ -304,8 +307,8 @@ export default function App() {
         // 非流式：一次性拿到完整文本
         const data = await res.json()
         appendAssistant(data.text ?? '')
-        // 聊天成功：记录本次使用的配置到历史
-        recordConfigUsed(baseUrl, apiKey)
+        // 聊天成功：记录本次使用的配置（含模型）到历史
+        recordConfigUsed(baseUrl, apiKey, model)
         return
       }
 
@@ -336,8 +339,8 @@ export default function App() {
           }
         }
       }
-      // 流式正常读完（收到连接结束）：记录本次使用的配置到历史
-      recordConfigUsed(baseUrl, apiKey)
+      // 流式正常读完（收到连接结束）：记录本次使用的配置（含模型）到历史
+      recordConfigUsed(baseUrl, apiKey, model)
     } catch (err) {
       message.error(String(err))
       // 失败时移除那个空的助手气泡（配置不记入历史）
@@ -356,6 +359,8 @@ export default function App() {
     : ''
   // Tab2 显示整个会话：JSONC 数组，一项 = 一个请求 + 一个回复（各自的元信息以注释写在正文前）
   const sessionJsonText = sessionJson.length > 0 ? renderSessionJsonc(sessionJson) : ''
+  // 模型下拉选项：历史用过的模型 + 当前 Fetch 到的模型（去重，历史在前）
+  const modelOptions = [...new Set([...modelHistory, ...models])].map((m) => ({ value: m }))
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'row', background: '#f5f5f5', boxSizing: 'border-box', padding: 12, gap: 12 }}>
@@ -381,7 +386,6 @@ export default function App() {
                 options={urlHistory.map((h) => ({ value: h }))}
                 placeholder="API URL"
                 size="small"
-                popupMatchSelectWidth={false}
                 style={{ width: 320 }}
               />
               <AutoComplete
@@ -390,7 +394,6 @@ export default function App() {
                 options={keyHistory.map((h) => ({ value: h }))}
                 placeholder="API Key"
                 size="small"
-                popupMatchSelectWidth={false}
                 style={{ width: 180 }}
               />
             </Space>
@@ -399,10 +402,9 @@ export default function App() {
               <AutoComplete
                 value={model}
                 onChange={setModel}
-                options={models.map((m) => ({ value: m }))}
+                options={modelOptions}
                 placeholder="选择或输入模型"
                 size="small"
-                popupMatchSelectWidth={false}
                 style={{ width: 200 }}
               />
               <Button size="small" onClick={fetchModels} loading={fetching}>

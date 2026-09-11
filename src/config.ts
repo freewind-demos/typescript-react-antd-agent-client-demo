@@ -6,9 +6,10 @@
 
 // 历史条目上限
 const MAX_HISTORY = 10
-// URL 历史与 Key 历史的 storage key 前缀
+// URL 历史、Key 历史（按 URL 分组）、模型历史的 storage key 前缀
 const URL_HISTORY_KEY = 'agent-client-demo:url'
 const KEY_HISTORY_PREFIX = 'agent-client-demo:key:'
+const MODEL_HISTORY_KEY = 'agent-client-demo:model'
 
 // 某个 URL 的 Key 历史 storage key（URL 编码避免特殊字符）
 function keyHistoryKey(url: string): string {
@@ -55,9 +56,15 @@ export function getLatestKeyForUrl(url: string): string | undefined {
   return getKeyHistoryForUrl(url)[0]
 }
 
-// 记录一次成功使用的配置：URL 进全局历史，Key 进该 URL 的专属历史；返回更新后的两个列表
-export function recordConfigUsed(url: string, key: string): { urlHistory: string[]; keyHistory: string[] } {
+// 读取全局模型历史（用过的模型名，最新的在最前）
+export function getModelHistory(): string[] {
+  return readList(MODEL_HISTORY_KEY)
+}
+
+// 记录一次成功使用的配置：URL 进全局历史，Key 进该 URL 的专属历史，模型进全局模型历史
+export function recordConfigUsed(url: string, key: string, model?: string): { urlHistory: string[]; keyHistory: string[]; modelHistory: string[] } {
   const urlHistory = pushToList(URL_HISTORY_KEY, url)
   const keyHistory = url && key ? pushToList(keyHistoryKey(url), key) : getKeyHistoryForUrl(url)
-  return { urlHistory, keyHistory }
+  const modelHistory = model ? pushToList(MODEL_HISTORY_KEY, model) : getModelHistory()
+  return { urlHistory, keyHistory, modelHistory }
 }
