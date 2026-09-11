@@ -11,6 +11,26 @@ const { TextArea } = Input
 // 聊天消息结构：角色 + 内容
 type ChatMessage = { role: 'user' | 'assistant'; content: string }
 
+// 会话里的一条交互记录：请求/响应各带 HTTP 元信息与协议 JSON 正文
+type InteractionRecord = {
+  request: { method: string; url: string; headers: Record<string, string>; body: unknown } | null
+  response: { status: number; statusText: string; headers: Record<string, string>; body: unknown } | null
+}
+
+// headers 转成若干行注释文本
+function headerCommentLines(headers: Record<string, string>): string[] {
+  const entries = Object.entries(headers)
+  if (entries.length === 0) return ['headers: (none)']
+  return ['headers:', ...entries.map(([k, v]) => `  ${k}: ${v}`)]
+}
+
+// 生成 JSONC：元信息（method/URL、status、headers）以 // 注释写在 JSON 正文之前
+function buildJsonc(metaLines: string[] | null, body: unknown): string {
+  if (metaLines === null) return ''
+  const comments = metaLines.map((line) => (line.startsWith('  ') ? `//${line}` : `// ${line}`))
+  return [...comments, body == null ? 'null' : JSON.stringify(body, null, 2)].join('\n')
+}
+
 export default function App() {
   // ---- 配置区状态 ----
   const [protocol, setProtocol] = useState<Protocol>('anthropic-messages')
@@ -35,8 +55,8 @@ export default function App() {
   const [sessionId, setSessionId] = useState(() => crypto.randomUUID())
   // 当前会话的 verbose 原样日志文本（初始从文件全量拉取，之后实时追加）
   const [logText, setLogText] = useState('')
-  // 当前会话累积的协议原生 JSON 列表（请求体 + 响应事件，日志面板"JSON"Tab 展示）
-  const [sessionJson, setSessionJson] = useState<unknown[]>([])
+  // 当前会话的交互记录列表（一项 = 一个请求 + 一个回复，含 HTTP 元信息与协议 JSON 正文）
+  const [interactions, setInteractions] = useState<InteractionRecord[]>([])
   const logBoxRef = useRef<HTMLDivElement>(null)
   const jsonBoxRef = useRef<HTMLDivElement>(null)
 
@@ -65,16 +85,16 @@ export default function App() {
     setSessionId(crypto.randomUUID())
     setMessages([])
     setLogText('')
-    setSessionJson([])
+    setInteractions([])
   }
 
   // 清空当前会话的日志显示：之后只显示新产生的日志
   const clearLogs = () => {
     setLogText('')
-    setSessionJson([])
+    setInteractions([])
   }
 
-  // sessionId 变化时（首次进入 / 新会话）：从 Server 全量拉取该会话的 verbose 日志与结构化 JSON
+  // sessionId 变化时（首次进入 / 新会话）：从 Server 全量拉取该会话的 verbose 日志与交互记录
   useEffect(() => {
     fetch(`/api/logs/${sessionId}`)
       .then((res) => (res.ok ? res.text() : ''))
@@ -82,7 +102,7 @@ export default function App() {
       .catch(() => {})
     fetch(`/api/logs/${sessionId}/json`)
       .then((res) => (res.ok ? res.json() : null))
-      .then((data) => setSessionJson(Array.isArray(data) ? data : []))
+      .then((data) => setInteractions(Array.isArray(data) ? data : []))
       .catch(() => {})
   }, [sessionId])
 
@@ -97,9 +117,36 @@ export default function App() {
         if (typeof data.text === 'string') {
           setLogText((prev) => prev + data.text + '\n\n')
         }
-        // 追加本次事件里的协议原生 JSON（Server 已解析好）
-        if (Array.isArray(data.protocolJsons) && data.protocolJsons.length > 0) {
-          setSessionJson((prev) => [...prev, ...data.protocolJsons])
+        // 新请求：追加一条交互记录（带元信息与请求体），响应暂空
+        if (data.requestJson !== undefined) {
+          setInteractions((prev) => [
+            ...prev,
+            { request: { method: data.method, url: data.url, headers: data.headers ?? {}, body: data.requestJson }, response: null },
+          ])
+        }
+        // 收到响应头：记录 status 与 headers
+        if (data.type === 'response') {
+          setInteractions((prev) => {
+            if (prev.length === 0) return prev
+            const next = [...prev]
+            const last = next[next.length - 1]
+            next[next.length - 1] = { ...last, response: { status: data.status, statusText: data.statusText, headers: data.headers ?? {}, body: last.response?.body ?? null } }
+            return next
+          })
+        }
+        // 聚合后的完整响应正文：更新最后一条交互的 response.body
+        if (data.currentResponse !== undefined && data.currentResponse !== null) {
+          const aggregated = data.currentResponse
+          setInteractions((prev) => {
+            if (prev.length === 0) return prev
+            const next = [...prev]
+            const last = next[next.length - 1]
+            next[next.length - 1] = {
+              ...last,
+              response: { status: last.response?.status ?? 0, statusText: last.response?.statusText ?? '', headers: last.response?.headers ?? {}, body: aggregated },
+            }
+            return next
+          })
         }
       } catch {
         // 心跳等无法解析的内容直接忽略
@@ -117,7 +164,7 @@ export default function App() {
   useEffect(() => {
     const el = jsonBoxRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [sessionJson])
+  }, [interactions])
 
   // Fetch Models：调用当前协议的模型接口，返回模型列表
   const fetchModels = async () => {
@@ -233,6 +280,24 @@ export default function App() {
     }
   }
 
+  // Tab1 显示"最新一次"请求/响应，元信息（method/URL/status/headers）以 // 注释写在 JSON 前（JSONC）
+  const lastInteraction = interactions.length > 0 ? interactions[interactions.length - 1] : null
+  const requestJsonc = lastInteraction?.request
+    ? buildJsonc([`${lastInteraction.request.method} ${lastInteraction.request.url}`, ...headerCommentLines(lastInteraction.request.headers)], lastInteraction.request.body)
+    : ''
+  const responseJsonc = lastInteraction?.response
+    ? buildJsonc([`${lastInteraction.response.status} ${lastInteraction.response.statusText}`, ...headerCommentLines(lastInteraction.response.headers)], lastInteraction.response.body)
+    : ''
+  // Tab2 显示整个会话：数组，一项 = 一个请求 + 一个回复（只含协议原生 JSON 正文）
+  const sessionJsonText =
+    interactions.length > 0
+      ? JSON.stringify(
+          interactions.map((item) => ({ request: item.request?.body ?? null, response: item.response?.body ?? null })),
+          null,
+          2,
+        )
+      : ''
+
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'row', background: '#f5f5f5', boxSizing: 'border-box', padding: 12, gap: 12 }}>
       {/* ---- 左侧：配置区 + 聊天区（占 40%） ---- */}
@@ -341,25 +406,46 @@ export default function App() {
         `}</style>
         <Tabs
           className="logs-tabs"
-          defaultActiveKey="json"
+          defaultActiveKey="current"
           tabBarExtraContent={{ right: <Button size="small" onClick={clearLogs}>清空</Button> }}
           items={[
-            // JSON Tab（默认）：整个会话的结构化 JSON（请求 headers/body、响应 status/headers、完整回复文本）
+            // Tab1（默认）：上下两个区域，各显示最新一次的 Request / Response（JSONC 格式：元信息为注释）
             {
-              key: 'json',
-              label: 'JSON',
+              key: 'current',
+              label: '请求/响应',
+              children: (
+                <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {/* Request 区：最新一次请求 */}
+                  <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
+                    <div style={{ flex: 'none', color: '#888888', fontSize: 11, marginBottom: 4 }}>Request（最新一次）</div>
+                    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre' }}>
+                      {requestJsonc || '（暂无请求）'}
+                    </div>
+                  </div>
+                  {/* Response 区：最新一次响应（流式已聚合为完整响应） */}
+                  <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
+                    <div style={{ flex: 'none', color: '#888888', fontSize: 11, marginBottom: 4 }}>Response（最新一次，流式已聚合为完整响应）</div>
+                    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre' }}>
+                      {responseJsonc || '（暂无响应）'}
+                    </div>
+                  </div>
+                </div>
+              ),
+            },
+            // Tab2：整个会话 —— 数组形式，一个请求配一个回复（协议原生 JSON）
+            {
+              key: 'session',
+              label: '会话',
               children: (
                 <div
                   ref={jsonBoxRef}
                   style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre', wordBreak: 'break-all' }}
                 >
-                  {sessionJson.length > 0
-                    ? JSON.stringify(sessionJson, null, 2)
-                    : '（暂无协议 JSON。发送消息或 Fetch Models 后，这里按顺序展示整个会话里协议原生的 JSON：每次请求的请求体、响应的每个事件，不含 HTTP headers 等杂项）'}
+                  {sessionJsonText || '（暂无会话。这里以数组形式展示整个会话：一项 = 一个请求 + 一个回复，均为协议原生的 JSON）'}
                 </div>
               ),
             },
-            // verbose Tab：最底层原样日志（完整 headers / body / 每个 SSE 分片）
+            // Tab3：verbose —— 最底层原样日志（完整 headers / body / 每个 SSE 分片）
             {
               key: 'verbose',
               label: 'verbose',

@@ -2,7 +2,11 @@
 
 ## 简介
 
-这个 Demo 演示一个 **Agent Client 调试工具**：在一个微信式聊天界面里，通过三种不同的 AI 协议（Anthropic Messages、OpenAI Chat Completions、OpenAI Responses）与模型对话，并在底部日志面板**从 Client 视角原样展示每一次请求和响应的完整内容**——包括请求的 method、URL、全部 headers、body，响应的状态码、全部 headers、body，流式响应时每一个 SSE 分片单独一条、绝不合并。
+这个 Demo 演示一个 **Agent Client 调试工具**：在一个微信式聊天界面里，通过三种不同的 AI 协议（Anthropic Messages、OpenAI Chat Completions、OpenAI Responses）与模型对话，并在右侧日志面板从 Client 视角记录每一次交互。日志面板分三个 Tab：
+
+- **请求/响应**（默认）：上下两个区域，各只保留最近 2 条（最新的在下，多余的被顶掉）。Request 区显示协议原生的请求 JSON，Response 区显示**聚合后的完整响应**（流式响应把文本增量拼完整、补齐 stop_reason / usage 等）
+- **会话**：整个会话的数组，一项 = 一个请求 + 一个回复，均为协议原生 JSON
+- **verbose**：最底层的原样记录——请求的 method、URL、全部 headers、body，响应的状态码、全部 headers、body，流式响应时每一个 SSE 分片单独一条、绝不合并
 
 它解决的问题：真实业务中我们调用 AI 协议时用的是官方 SDK，SDK 内部自动拼接 URL、自动加 headers（如 `x-api-key`、`anthropic-version`、`user-agent`），出了问题很难看到"网络上到底发了什么"。本 Demo 在 SDK 底层注入一层日志中间件，把 SDK 发出的每一个 HTTP 请求原样记录下来，让你看清协议的真实形态。
 
@@ -30,11 +34,11 @@ pnpm run dev
 
 使用步骤：
 
-1. 选择协议（三种下拉任选，切换后 API URL 会自动换成该协议默认地址，可改）
+1. 选择协议（三种下拉任选，API URL 与 API Key 会带上该协议上次成功使用过的历史值，可改；从没填过则留空）
 2. 填 API URL 和 API Key（Anthropic 填根地址如 `https://api.anthropic.com`；OpenAI 填到 `/v1` 如 `https://api.openai.com/v1`；中转服务按其要求填）
 3. 点 Fetch Models 拉取模型列表，从下拉里选一个模型
 4. 打开/关闭"流式"开关，在聊天框输入消息回车发送
-5. 看底部日志面板：每个请求/响应的原始内容实时滚动展示
+5. 看右侧日志面板：默认"请求/响应"Tab 显示当前请求/响应的协议内容，"会话"Tab 看整个会话，"verbose"Tab 看最底层原样日志
 
 ## 注意事项
 
@@ -93,9 +97,10 @@ pnpm run dev
 `src/server/logger.ts` 的 `LogManager`：
 
 - 每条日志事件追加写入 `logs/<sessionId>.log`，格式为 `=== [REQUEST] POST xxx @ 时间 ===` 这类块，区分方向、按时间顺序
-- 同时以 SSE 格式（`data: {...}`）广播给所有订阅了 `/api/logs/stream` 的前端
+- 同时维护会话交互列表（一个请求配一个回复，均为协议原生 JSON）：请求体直接来自 request body，响应用 `aggregateResponse()` 聚合——流式响应把文本增量拼完整并补齐 stop_reason / finish_reason / usage 等，非流式响应本身就是完整对象；该列表覆盖写入 `logs/<sessionId>.json`
+- 每次事件以 SSE 格式（`data: {...}`）广播给所有订阅了 `/api/logs/stream` 的前端，广播里带上本次的请求 JSON 与聚合后的当前响应，前端直接更新
 
-前端页面加载时建立 `EventSource('/api/logs/stream')` 订阅实时日志；切会话（点"新会话"或刷新）时先 `GET /api/logs/:sessionId` 把该会话已有日志文件全量拉回来显示，之后靠 SSE 增量追加。日志面板固定最大高度、带滚动条，并自动滚到最新一条。
+前端页面加载时建立 `EventSource('/api/logs/stream')` 订阅实时日志；切会话（点"新会话"或刷新）时先 `GET /api/logs/:sessionId` 拉该会话的 verbose 日志、`GET /api/logs/:sessionId/json` 拉交互列表，之后靠 SSE 增量更新。右侧日志区撑满页面高度、各自滚动，并自动滚到最新一条。
 
 ### 关键代码位置
 
