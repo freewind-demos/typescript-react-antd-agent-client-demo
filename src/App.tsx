@@ -2,11 +2,12 @@
 // + 微信式聊天区 + 日志面板（实时原样展示当前会话的所有请求与响应）
 
 import { useEffect, useRef, useState } from 'react'
-import { AutoComplete, Button, Card, Input, Select, Space, Switch, Tabs, message } from 'antd'
+import { AutoComplete, Button, Card, Flex, Input, Select, Space, Switch, Tabs, Typography, message } from 'antd'
 import { PROTOCOLS, type Protocol } from './protocols'
 import { getKeyHistoryForUrl, getLatestKeyForUrl, getModelHistory, getUrlHistory, recordConfigUsed as saveConfigUsed } from './config'
 
 const { TextArea } = Input
+const { Text } = Typography
 
 // 聊天消息结构：角色 + 内容
 type ChatMessage = { role: 'user' | 'assistant'; content: string }
@@ -363,9 +364,9 @@ export default function App() {
   const modelOptions = [...new Set([...modelHistory, ...models])].map((m) => ({ value: m }))
 
   return (
-    <div style={{ height: '100vh', display: 'flex', flexDirection: 'row', background: '#f5f5f5', boxSizing: 'border-box', padding: 12, gap: 12 }}>
+    <Flex gap={12} style={{ height: '100vh', background: '#f5f5f5', boxSizing: 'border-box', padding: 12 }}>
       {/* ---- 左侧：配置区 + 聊天区（占 40%） ---- */}
-      <div style={{ flex: '0 0 40%', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <Flex vertical gap={12} style={{ flex: '0 0 40%', minWidth: 0 }}>
         {/* 顶部配置区：三行布局 */}
         <Card size="small" title="Agent Client 配置">
           <Space direction="vertical" size="small" style={{ width: '100%' }}>
@@ -434,13 +435,15 @@ export default function App() {
           style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
           styles={{ body: { flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' } }}
         >
-          <div style={{ flex: 1, overflowY: 'auto', padding: 4 }}>
+          <Flex vertical style={{ flex: 1, overflowY: 'auto', padding: 4 }}>
             {messages.length === 0 && (
-              <div style={{ color: '#999', textAlign: 'center', marginTop: 40 }}>填写配置并 Fetch Models 后，开始聊天吧</div>
+              <Flex justify="center" style={{ marginTop: 40 }}>
+                <Text type="secondary">填写配置并 Fetch Models 后，开始聊天吧</Text>
+              </Flex>
             )}
             {messages.map((m, i) => (
-              <div key={i} style={{ display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start', marginBottom: 10 }}>
-                <div
+              <Flex key={i} justify={m.role === 'user' ? 'flex-end' : 'flex-start'} style={{ marginBottom: 10 }}>
+                <Flex
                   style={{
                     maxWidth: '70%',
                     padding: '8px 12px',
@@ -453,11 +456,11 @@ export default function App() {
                   }}
                 >
                   {m.content || (i === messages.length - 1 && sending ? '…' : '')}
-                </div>
-              </div>
+                </Flex>
+              </Flex>
             ))}
-          </div>
-          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          </Flex>
+          <Flex gap={8} style={{ marginTop: 8 }}>
             <TextArea
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -474,9 +477,9 @@ export default function App() {
             <Button type="primary" size="small" onClick={handleSend} loading={sending}>
               发送
             </Button>
-          </div>
+          </Flex>
         </Card>
-      </div>
+      </Flex>
 
       {/* ---- 右侧：日志面板（占 60%），双 Tab：整合 / verbose ---- */}
       <Card size="small" style={{ flex: '0 0 60%', minWidth: 0, display: 'flex', flexDirection: 'column' }} styles={{ body: { flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden', padding: 0 } }}>
@@ -499,28 +502,32 @@ export default function App() {
               key: 'current',
               label: '请求/响应',
               children: (
-                <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <Flex vertical gap={8} style={{ flex: 1, minHeight: 0 }}>
                   {/* 本 Tab 自己的清空（只清 Tab1 显示，不影响其他 Tab） */}
-                  <div style={{ flex: 'none', display: 'flex', justifyContent: 'flex-end' }}>
+                  <Flex justify="flex-end" style={{ flex: 'none' }}>
                     <Button size="small" onClick={clearTab1}>
                       清空
                     </Button>
-                  </div>
+                  </Flex>
                   {/* Request 区：最新一次请求 */}
-                  <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
-                    <div style={{ flex: 'none', color: '#888888', fontSize: 11, marginBottom: 4 }}>Request（最新一次）</div>
-                    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre' }}>
+                  <Flex vertical style={{ flex: 1, minHeight: 0, background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
+                    <Text type="secondary" style={{ fontSize: 11, marginBottom: 4 }}>
+                      Request（最新一次）
+                    </Text>
+                    <Flex vertical style={{ flex: 1, minHeight: 0, overflowY: 'auto', fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre' }}>
                       {requestJsonc || '（暂无请求）'}
-                    </div>
-                  </div>
+                    </Flex>
+                  </Flex>
                   {/* Response 区：最新一次响应（流式已聚合为完整响应） */}
-                  <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
-                    <div style={{ flex: 'none', color: '#888888', fontSize: 11, marginBottom: 4 }}>Response（最新一次，流式已聚合为完整响应）</div>
-                    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre' }}>
+                  <Flex vertical style={{ flex: 1, minHeight: 0, background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
+                    <Text type="secondary" style={{ fontSize: 11, marginBottom: 4 }}>
+                      Response（最新一次，流式已聚合为完整响应）
+                    </Text>
+                    <Flex vertical style={{ flex: 1, minHeight: 0, overflowY: 'auto', fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre' }}>
                       {responseJsonc || '（暂无响应）'}
-                    </div>
-                  </div>
-                </div>
+                    </Flex>
+                  </Flex>
+                </Flex>
               ),
             },
             // Tab2：整个会话 —— JSONC 数组，一个请求配一个回复
@@ -528,19 +535,20 @@ export default function App() {
               key: 'session',
               label: '会话',
               children: (
-                <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  <div style={{ flex: 'none', display: 'flex', justifyContent: 'flex-end' }}>
+                <Flex vertical gap={8} style={{ flex: 1, minHeight: 0 }}>
+                  <Flex justify="flex-end" style={{ flex: 'none' }}>
                     <Button size="small" onClick={clearTab2}>
                       清空
                     </Button>
-                  </div>
-                  <div
+                  </Flex>
+                  <Flex
                     ref={jsonBoxRef}
+                    vertical
                     style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre', wordBreak: 'break-all' }}
                   >
                     {sessionJsonText || '（暂无会话。这里以数组形式展示整个会话：一项 = 一个请求 + 一个回复，均为协议原生的 JSON）'}
-                  </div>
-                </div>
+                  </Flex>
+                </Flex>
               ),
             },
             // Tab3：verbose —— 最底层原样日志（完整 headers / body / 每个 SSE 分片）
@@ -548,24 +556,25 @@ export default function App() {
               key: 'verbose',
               label: 'verbose',
               children: (
-                <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  <div style={{ flex: 'none', display: 'flex', justifyContent: 'flex-end' }}>
+                <Flex vertical gap={8} style={{ flex: 1, minHeight: 0 }}>
+                  <Flex justify="flex-end" style={{ flex: 'none' }}>
                     <Button size="small" onClick={clearTab3}>
                       清空
                     </Button>
-                  </div>
-                  <div
+                  </Flex>
+                  <Flex
                     ref={logBoxRef}
+                    vertical
                     style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
                   >
                     {logText || '（暂无日志。发送消息或 Fetch Models 后，这里会原样显示所有发出的请求与收到的响应，流式时每个 SSE 分片单独一条）'}
-                  </div>
-                </div>
+                  </Flex>
+                </Flex>
               ),
             },
           ]}
         />
       </Card>
-    </div>
+    </Flex>
   )
 }
