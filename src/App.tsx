@@ -111,6 +111,9 @@ export default function App() {
   const logBoxRef = useRef<HTMLDivElement>(null)
   const jsonBoxRef = useRef<HTMLDivElement>(null)
 
+  // 日志面板当前选中的 Tab（右侧清空按钮据此清对应的数据）
+  const [activeLogTab, setActiveLogTab] = useState('current')
+
   // 当前协议对应的元数据（Endpoint 等）
   const meta = PROTOCOLS.find((p) => p.value === protocol)!
 
@@ -149,6 +152,13 @@ export default function App() {
   const clearTab1 = () => setCurrentPair(null) // Tab1「请求/响应」
   const clearTab2 = () => setSessionJson([]) // Tab2「会话」
   const clearTab3 = () => setLogText('') // Tab3「verbose」
+
+  // 清空当前选中的 Tab（按钮在 Tab 标题行最右侧）
+  const clearCurrentTab = () => {
+    if (activeLogTab === 'current') clearTab1()
+    else if (activeLogTab === 'session') clearTab2()
+    else clearTab3()
+  }
 
   // sessionId 变化时（首次进入 / 新会话）：从 Server 全量拉取该会话的 verbose 日志与交互记录
   useEffect(() => {
@@ -499,8 +509,16 @@ export default function App() {
             `}</style>
             <Tabs
               className="logs-tabs"
-              defaultActiveKey="current"
               size="small"
+              activeKey={activeLogTab}
+              onChange={setActiveLogTab}
+              tabBarExtraContent={{
+                right: (
+                  <Button size="small" onClick={clearCurrentTab}>
+                    清空
+                  </Button>
+                ),
+              }}
               items={[
                 // Tab1（默认）：上下两个区域，各显示最新一次的 Request / Response（JSONC：元信息为注释）
                 {
@@ -508,12 +526,6 @@ export default function App() {
                   label: '请求/响应',
                   children: (
                     <Flex vertical gap={8} style={{ flex: 1, minHeight: 0 }}>
-                      {/* 本 Tab 自己的清空（只清 Tab1 显示，不影响其他 Tab） */}
-                      <Flex justify="flex-end" style={{ flex: 'none' }}>
-                        <Button size="small" onClick={clearTab1}>
-                          清空
-                        </Button>
-                      </Flex>
                       {/* Request 区：最新一次请求 */}
                       <Flex vertical style={{ flex: 1, minHeight: 0, background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
                         <Text type="secondary" style={{ fontSize: 11, marginBottom: 4 }}>
@@ -541,11 +553,6 @@ export default function App() {
                   label: '会话',
                   children: (
                     <Flex vertical gap={8} style={{ flex: 1, minHeight: 0 }}>
-                      <Flex justify="flex-end" style={{ flex: 'none' }}>
-                        <Button size="small" onClick={clearTab2}>
-                          清空
-                        </Button>
-                      </Flex>
                       <Flex
                         ref={jsonBoxRef}
                         vertical
@@ -562,11 +569,6 @@ export default function App() {
                   label: 'verbose',
                   children: (
                     <Flex vertical gap={8} style={{ flex: 1, minHeight: 0 }}>
-                      <Flex justify="flex-end" style={{ flex: 'none' }}>
-                        <Button size="small" onClick={clearTab3}>
-                          清空
-                        </Button>
-                      </Flex>
                       <Flex
                         ref={logBoxRef}
                         vertical
