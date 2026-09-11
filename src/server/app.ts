@@ -29,8 +29,8 @@ function handleChat(protocol: Protocol) {
       return
     }
     try {
-      // 日志回调：写文件 + 广播给订阅的 SSE 客户端
-      const onEvent = (event: LogEvent) => logManager.append(sessionId, event)
+      // 日志回调：写文件 + 广播给订阅的 SSE 客户端（带协议用于生成整合摘要）
+      const onEvent = (event: LogEvent) => logManager.append(sessionId, event, protocol)
       const result: ChatResult = await chatWithProtocol(protocol, { baseUrl, apiKey, model, messages, stream: !!stream, onEvent })
 
       if (!result.stream) {
@@ -71,7 +71,7 @@ function handleModels(protocol: Protocol) {
     }
     try {
       // Fetch Models 请求同样记录日志（有 sessionId 时），方便看到模型接口的原始交互
-      const onEvent = sessionId ? (event: LogEvent) => logManager.append(sessionId, event) : () => {}
+      const onEvent = sessionId ? (event: LogEvent) => logManager.append(sessionId, event, protocol) : () => {}
       const models = await listModels(protocol, baseUrl, apiKey, onEvent)
       res.json({ models })
     } catch (error) {
@@ -113,6 +113,16 @@ export function buildApp(): express.Express {
       clearInterval(heartbeat)
       unsubscribe()
     })
+  })
+
+  // 读取某个会话的整合摘要文件内容（日志面板"整合"Tab）
+  app.get('/api/logs/:sessionId/summary', (req, res) => {
+    const content = logManager.readSummaryFile(req.params.sessionId)
+    if (content === null) {
+      res.status(404).json({ error: 'summary file not found' })
+      return
+    }
+    res.type('text/plain').send(content)
   })
 
   // 读取某个会话的完整日志文件内容（换会话即换 sessionId）

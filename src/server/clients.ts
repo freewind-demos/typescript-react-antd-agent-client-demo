@@ -3,7 +3,7 @@
 
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
-import { createLoggingFetch, type LogEvent } from './middleware'
+import { createLoggingFetch, type LogEvent } from './middleware.js'
 
 // 支持的三种协议标识
 export type Protocol = 'anthropic-messages' | 'openai-chat-completions' | 'openai-responses'

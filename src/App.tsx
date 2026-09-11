@@ -2,8 +2,9 @@
 // + 微信式聊天区 + 日志面板（实时原样展示当前会话的所有请求与响应）
 
 import { useEffect, useRef, useState } from 'react'
-import { Button, Card, Input, Select, Space, Switch, message } from 'antd'
+import { AutoComplete, Button, Card, Input, Select, Space, Switch, Tabs, message } from 'antd'
 import { PROTOCOLS, type Protocol } from './protocols'
+import { getHistory, pushHistory } from './config'
 
 const { TextArea } = Input
 
@@ -13,8 +14,12 @@ type ChatMessage = { role: 'user' | 'assistant'; content: string }
 export default function App() {
   // ---- 配置区状态 ----
   const [protocol, setProtocol] = useState<Protocol>('anthropic-messages')
-  const [baseUrl, setBaseUrl] = useState(PROTOCOLS[0].defaultBaseUrl)
-  const [apiKey, setApiKey] = useState('')
+  // 初始值取该协议最近一次成功使用的历史（无历史则留空，不预填厂商默认地址）
+  const [baseUrl, setBaseUrl] = useState(() => getHistory('anthropic-messages', 'url')[0] ?? '')
+  const [apiKey, setApiKey] = useState(() => getHistory('anthropic-messages', 'key')[0] ?? '')
+  // 该协议下已记录的历史列表（驱动 AutoComplete 下拉）
+  const [urlHistory, setUrlHistory] = useState<string[]>(() => getHistory('anthropic-messages', 'url'))
+  const [keyHistory, setKeyHistory] = useState<string[]>(() => getHistory('anthropic-messages', 'key'))
   const [models, setModels] = useState<string[]>([])
   const [model, setModel] = useState<string | undefined>(undefined)
   const [fetching, setFetching] = useState(false)
@@ -28,19 +33,31 @@ export default function App() {
   // ---- 日志区状态 ----
   // sessionId：每个会话一个，切换即换日志文件
   const [sessionId, setSessionId] = useState(() => crypto.randomUUID())
-  // 当前会话的完整日志文本（初始从文件全量拉取，之后实时追加）
+  // 当前会话的 verbose 原样日志文本（初始从文件全量拉取，之后实时追加）
   const [logText, setLogText] = useState('')
+  // 当前会话的整合摘要文本（协议层可读内容，日志面板"整合"Tab）
+  const [summaryText, setSummaryText] = useState('')
   const logBoxRef = useRef<HTMLDivElement>(null)
+  const summaryBoxRef = useRef<HTMLDivElement>(null)
 
   // 当前协议对应的元数据（Endpoint 等）
   const meta = PROTOCOLS.find((p) => p.value === protocol)!
 
-  // 切换协议：重置 API URL 与模型
+  // 切换协议：加载该协议的历史配置（无历史则留空），重置模型；聊天与日志不受影响
   const onProtocolChange = (value: Protocol) => {
     setProtocol(value)
-    setBaseUrl(PROTOCOLS.find((p) => p.value === value)!.defaultBaseUrl)
+    setBaseUrl(getHistory(value, 'url')[0] ?? '')
+    setApiKey(getHistory(value, 'key')[0] ?? '')
+    setUrlHistory(getHistory(value, 'url'))
+    setKeyHistory(getHistory(value, 'key'))
     setModels([])
     setModel(undefined)
+  }
+
+  // 成功使用后记录配置历史：去重置顶（重复值不新增，只置顶），并刷新下拉列表
+  const recordConfigUsed = (p: Protocol, url: string, key: string) => {
+    setUrlHistory(pushHistory(p, 'url', url))
+    setKeyHistory(pushHistory(p, 'key', key))
   }
 
   // 新会话：生成新 sessionId（新日志文件），清空聊天与日志
@@ -48,13 +65,24 @@ export default function App() {
     setSessionId(crypto.randomUUID())
     setMessages([])
     setLogText('')
+    setSummaryText('')
   }
 
-  // sessionId 变化时（首次进入 / 新会话）：从 Server 全量拉取该会话的日志文件
+  // 清空当前会话的日志显示：之后只显示新产生的日志
+  const clearLogs = () => {
+    setLogText('')
+    setSummaryText('')
+  }
+
+  // sessionId 变化时（首次进入 / 新会话）：从 Server 全量拉取该会话的日志文件与整合摘要
   useEffect(() => {
     fetch(`/api/logs/${sessionId}`)
       .then((res) => (res.ok ? res.text() : ''))
       .then((text) => setLogText(text))
+      .catch(() => {})
+    fetch(`/api/logs/${sessionId}/summary`)
+      .then((res) => (res.ok ? res.text() : ''))
+      .then((text) => setSummaryText(text))
       .catch(() => {})
   }, [sessionId])
 
@@ -65,8 +93,12 @@ export default function App() {
       try {
         const data = JSON.parse(event.data)
         // 只显示当前会话的日志，其他会话（其他标签页等）忽略
-        if (data.sessionId === sessionId && typeof data.text === 'string') {
+        if (data.sessionId !== sessionId) return
+        if (typeof data.text === 'string') {
           setLogText((prev) => prev + data.text + '\n\n')
+        }
+        if (typeof data.summary === 'string' && data.summary) {
+          setSummaryText((prev) => prev + data.summary + '\n')
         }
       } catch {
         // 心跳等无法解析的内容直接忽略
@@ -75,11 +107,16 @@ export default function App() {
     return () => es.close()
   }, [sessionId])
 
-  // 日志面板自动滚到底部，始终展示最新日志
+  // 日志面板自动滚到底部：verbose 与整合摘要各自滚动
   useEffect(() => {
     const el = logBoxRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [logText])
+
+  useEffect(() => {
+    const el = summaryBoxRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [summaryText])
 
   // Fetch Models：调用当前协议的模型接口，返回模型列表
   const fetchModels = async () => {
@@ -99,6 +136,8 @@ export default function App() {
         throw new Error(data.error || `HTTP ${res.status}`)
       }
       setModels(data.models ?? [])
+      // 成功拉到模型后记录本次使用的配置到历史（去重置顶）
+      recordConfigUsed(protocol, baseUrl, apiKey)
       // 拿到列表后默认选中第一个
       if (data.models?.length) {
         setModel(data.models[0])
@@ -150,6 +189,8 @@ export default function App() {
         // 非流式：一次性拿到完整文本
         const data = await res.json()
         appendAssistant(data.text ?? '')
+        // 聊天成功：记录本次使用的配置到历史
+        recordConfigUsed(protocol, baseUrl, apiKey)
         return
       }
 
@@ -180,9 +221,11 @@ export default function App() {
           }
         }
       }
+      // 流式正常读完（收到连接结束）：记录本次使用的配置到历史
+      recordConfigUsed(protocol, baseUrl, apiKey)
     } catch (err) {
       message.error(String(err))
-      // 失败时移除那个空的助手气泡
+      // 失败时移除那个空的助手气泡（配置不记入历史）
       setMessages((prev) => prev.slice(0, -1))
     } finally {
       setSending(false)
@@ -191,8 +234,8 @@ export default function App() {
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'row', background: '#f5f5f5', boxSizing: 'border-box', padding: 12, gap: 12 }}>
-      {/* ---- 左侧：配置区 + 聊天区 ---- */}
-      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
+      {/* ---- 左侧：配置区 + 聊天区（占 40%） ---- */}
+      <div style={{ flex: '0 0 40%', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
         {/* 顶部配置区 */}
         <Card size="small" title="Agent Client 配置">
           <Space wrap>
@@ -203,8 +246,20 @@ export default function App() {
               options={PROTOCOLS.map((p) => ({ value: p.value, label: p.label }))}
               style={{ width: 220 }}
             />
-            <Input placeholder="API URL" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} style={{ width: 320 }} />
-            <Input placeholder="API Key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} style={{ width: 260 }} />
+            <AutoComplete
+              value={baseUrl}
+              onChange={setBaseUrl}
+              options={urlHistory.map((h) => ({ value: h }))}
+              placeholder="API URL"
+              style={{ width: 320 }}
+            />
+            <AutoComplete
+              value={apiKey}
+              onChange={setApiKey}
+              options={keyHistory.map((h) => ({ value: h }))}
+              placeholder="API Key"
+              style={{ width: 260 }}
+            />
             <Button onClick={fetchModels} loading={fetching}>
               Fetch Models
             </Button>
@@ -272,26 +327,48 @@ export default function App() {
         </Card>
       </div>
 
-      {/* ---- 右侧：日志面板（固定宽度，撑满高度滚动，原样展示） ---- */}
-      <Card size="small" title="日志（原样记录 Request / Response / SSE 分片）" style={{ width: 480, display: 'flex', flexDirection: 'column' }} styles={{ body: { flex: 1, minHeight: 0, display: 'flex' } }}>
-        <div
-          ref={logBoxRef}
-          style={{
-            flex: 1,
-            minHeight: 0,
-            overflowY: 'auto',
-            background: '#111111',
-            color: '#e6e6e6',
-            borderRadius: 6,
-            padding: 10,
-            fontFamily: 'Menlo, Consolas, monospace',
-            fontSize: 12,
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-all',
-          }}
-        >
-          {logText || '（暂无日志。发送消息或 Fetch Models 后，这里会原样显示所有发出的请求与收到的响应，流式时每个 SSE 分片单独一条）'}
-        </div>
+      {/* ---- 右侧：日志面板（占 60%），双 Tab：整合 / verbose ---- */}
+      <Card size="small" style={{ flex: '0 0 60%', minWidth: 0, display: 'flex', flexDirection: 'column' }} styles={{ body: { flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden', padding: 0 } }}>
+        {/* Tabs 撑满高度：antd Tabs 默认不撑满，用类名控制子元素 */}
+        <style>{`
+          .logs-tabs { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0 12px; }
+          .logs-tabs .ant-tabs-content-holder { flex: 1; min-height: 0; }
+          .logs-tabs .ant-tabs-content { height: 100%; }
+          .logs-tabs .ant-tabs-tabpane { height: 100%; }
+        `}</style>
+        <Tabs
+          className="logs-tabs"
+          defaultActiveKey="summary"
+          tabBarExtraContent={{ right: <Button size="small" onClick={clearLogs}>清空</Button> }}
+          items={[
+            // 整合 Tab：协议层可读内容（请求摘要 / 响应状态 / 提取的文本）
+            {
+              key: 'summary',
+              label: '整合',
+              children: (
+                <div
+                  ref={summaryBoxRef}
+                  style={{ height: '100%', overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
+                >
+                  {summaryText || '（暂无整合日志。发送消息后这里显示协议层摘要：请求模型/消息、响应状态、模型回复文本）'}
+                </div>
+              ),
+            },
+            // verbose Tab：最底层原样日志（完整 headers / body / 每个 SSE 分片）
+            {
+              key: 'verbose',
+              label: 'verbose',
+              children: (
+                <div
+                  ref={logBoxRef}
+                  style={{ height: '100%', overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
+                >
+                  {logText || '（暂无日志。发送消息或 Fetch Models 后，这里会原样显示所有发出的请求与收到的响应，流式时每个 SSE 分片单独一条）'}
+                </div>
+              ),
+            },
+          ]}
+        />
       </Card>
     </div>
   )
