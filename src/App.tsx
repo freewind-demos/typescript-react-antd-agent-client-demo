@@ -357,43 +357,52 @@ export default function App() {
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'row', background: '#f5f5f5', boxSizing: 'border-box', padding: 12, gap: 12 }}>
       {/* ---- 左侧：配置区 + 聊天区（占 40%） ---- */}
       <div style={{ flex: '0 0 40%', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {/* 顶部配置区 */}
+        {/* 顶部配置区：三行布局 */}
         <Card size="small" title="Agent Client 配置">
-          <Space wrap>
-            <span>协议</span>
-            <Select
-              value={protocol}
-              onChange={onProtocolChange}
-              options={PROTOCOLS.map((p) => ({ value: p.value, label: p.label }))}
-              style={{ width: 220 }}
-            />
-            <AutoComplete
-              value={baseUrl}
-              onChange={setBaseUrl}
-              options={urlHistory.map((h) => ({ value: h }))}
-              placeholder="API URL"
-              style={{ width: 320 }}
-            />
-            <AutoComplete
-              value={apiKey}
-              onChange={setApiKey}
-              options={keyHistory.map((h) => ({ value: h }))}
-              placeholder="API Key"
-              style={{ width: 260 }}
-            />
-            <Button onClick={fetchModels} loading={fetching}>
-              Fetch Models
-            </Button>
-            <AutoComplete
-              value={model}
-              onChange={setModel}
-              options={models.map((m) => ({ value: m }))}
-              placeholder="选择或输入模型"
-              style={{ width: 260 }}
-            />
-            <span>流式</span>
-            <Switch checked={stream} onChange={setStream} />
-            <Button onClick={newSession}>新会话</Button>
+          <Space direction="vertical" size="small" style={{ width: '100%' }}>
+            {/* 第一行：协议 + API URL + API Key */}
+            <Space wrap>
+              <span>协议</span>
+              <Select
+                value={protocol}
+                onChange={onProtocolChange}
+                options={PROTOCOLS.map((p) => ({ value: p.value, label: p.label }))}
+                style={{ width: 220 }}
+              />
+              <AutoComplete
+                value={baseUrl}
+                onChange={setBaseUrl}
+                options={urlHistory.map((h) => ({ value: h }))}
+                placeholder="API URL"
+                style={{ width: 320 }}
+              />
+              <AutoComplete
+                value={apiKey}
+                onChange={setApiKey}
+                options={keyHistory.map((h) => ({ value: h }))}
+                placeholder="API Key"
+                style={{ width: 260 }}
+              />
+            </Space>
+            {/* 第二行：模型选择 + Fetch Models（在右） */}
+            <Space wrap>
+              <AutoComplete
+                value={model}
+                onChange={setModel}
+                options={models.map((m) => ({ value: m }))}
+                placeholder="选择或输入模型"
+                style={{ width: 260 }}
+              />
+              <Button onClick={fetchModels} loading={fetching}>
+                Fetch Models
+              </Button>
+            </Space>
+            {/* 第三行：流式开关 + 新会话 */}
+            <Space wrap>
+              <span>流式</span>
+              <Switch checked={stream} onChange={setStream} />
+              <Button onClick={newSession}>新会话</Button>
+            </Space>
           </Space>
         </Card>
 
