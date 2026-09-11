@@ -376,7 +376,7 @@ export default function App() {
                 onChange={onProtocolChange}
                 options={PROTOCOLS.map((p) => ({ value: p.value, label: p.label }))}
                 size="small"
-                popupMatchSelectWidth={false}
+                popupMatchSelectWidth={true}
                 style={{ width: 170 }}
               />
               <AutoComplete
