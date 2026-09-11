@@ -67,17 +67,53 @@ function aggregateResponse(protocol: Protocol, events: unknown[]): unknown {
   const list = events as Array<Record<string, any>>
 
   if (protocol === 'anthropic-messages') {
-    // 流式：以 message_start 的 message 为骨架，拼接 text_delta，补 message_delta 的停止原因与用量
+    // 流式：以 message_start 的 message 为骨架，按 content block index 聚合各块
+    // （text / thinking / tool_use 等通通保留，不只取 text），再补 message_delta 的停止原因与用量
     const start = list.find((e) => e.type === 'message_start')
     if (!start) return events[0] // 非流式响应：本身就是完整对象
-    const text = list
-      .filter((e) => e.type === 'content_block_delta' && e.delta?.type === 'text_delta')
-      .map((e) => e.delta.text as string)
-      .join('')
+    const blocks: Record<number, Record<string, any>> = {}
+    for (const e of list) {
+      if (e.type === 'content_block_start') {
+        blocks[e.index] = { ...(e.content_block ?? {}) }
+      } else if (e.type === 'content_block_delta') {
+        const block = blocks[e.index] ?? (blocks[e.index] = {})
+        const d = e.delta ?? {}
+        if (d.type === 'text_delta') {
+          block.type = 'text'
+          block.text = (block.text ?? '') + d.text
+        } else if (d.type === 'thinking_delta') {
+          block.type = 'thinking'
+          block.thinking = (block.thinking ?? '') + d.thinking
+        } else if (d.type === 'signature_delta') {
+          block.signature = (block.signature ?? '') + d.signature
+        } else if (d.type === 'input_json_delta') {
+          block.type = 'tool_use'
+          block.__partialJson = (block.__partialJson ?? '') + d.partial_json
+        } else if (d.type === 'citations_delta') {
+          const citations = block.citations ?? (block.citations = [])
+          citations.push(d.citation)
+        }
+      } else if (e.type === 'content_block_stop') {
+        // 工具调用的参数是分片 JSON，这里解析回对象
+        const block = blocks[e.index]
+        if (block && typeof block.__partialJson === 'string') {
+          try {
+            block.input = JSON.parse(block.__partialJson)
+          } catch {
+            block.input = block.__partialJson
+          }
+          delete block.__partialJson
+        }
+      }
+    }
+    const content = Object.keys(blocks)
+      .map(Number)
+      .sort((a, b) => a - b)
+      .map((index) => blocks[index])
     const deltaEvent = list.find((e) => e.type === 'message_delta')
     return {
       ...(start.message ?? {}),
-      content: [{ type: 'text', text }],
+      content,
       stop_reason: deltaEvent?.delta?.stop_reason ?? null,
       stop_sequence: deltaEvent?.delta?.stop_sequence ?? null,
       ...(deltaEvent?.usage ? { usage: deltaEvent.usage } : {}),
@@ -87,7 +123,27 @@ function aggregateResponse(protocol: Protocol, events: unknown[]): unknown {
   if (protocol === 'openai-chat-completions') {
     // 非流式：object 为 chat.completion
     if (list[0]?.object !== 'chat.completion.chunk') return events[0]
-    const text = list.map((c) => c.choices?.[0]?.delta?.content ?? '').join('')
+    // 通用合并：delta 里所有字段都保留——字符串字段（content / reasoning_content 等）拼接，
+    // 其他字段取最后一个非空值，避免只挑 content 而丢掉推理内容或工具调用
+    const message: Record<string, unknown> = {}
+    for (const c of list) {
+      const delta = c.choices?.[0]?.delta
+      if (!delta) continue
+      for (const [key, value] of Object.entries(delta)) {
+        if (key === 'role') {
+          // role 是固定值，不参与拼接（多个 chunk 都可能带上）
+          message.role = value
+        } else if (typeof value === 'string') {
+          message[key] = ((message[key] as string) ?? '') + value
+        } else if (value != null) {
+          message[key] = value
+        }
+      }
+    }
+    // 协议要求 message 必须带 role
+    if (message.role == null) {
+      message.role = 'assistant'
+    }
     const finishEvent = [...list].reverse().find((c) => c.choices?.[0]?.finish_reason)
     const usageEvent = [...list].reverse().find((c) => c.usage)
     const first = list[0]
@@ -96,7 +152,7 @@ function aggregateResponse(protocol: Protocol, events: unknown[]): unknown {
       object: 'chat.completion',
       created: first.created,
       model: first.model,
-      choices: [{ index: 0, message: { role: 'assistant', content: text }, finish_reason: finishEvent?.choices?.[0]?.finish_reason ?? null }],
+      choices: [{ index: 0, message, finish_reason: finishEvent?.choices?.[0]?.finish_reason ?? null }],
       ...(usageEvent?.usage ? { usage: usageEvent.usage } : {}),
     }
   }
@@ -106,8 +162,10 @@ function aggregateResponse(protocol: Protocol, events: unknown[]): unknown {
   if (completed?.response) return completed.response
   const created = list.find((e) => e.type === 'response.created')
   if (!created) return events[0] // 非流式响应
+  // 流被中断（没有 response.completed）：用已完成的 output item 组装，并附上已收到的文本
+  const doneItems = list.filter((e) => e.type === 'response.output_item.done').map((e) => e.item)
   const text = list.filter((e) => e.type === 'response.output_text.delta').map((e) => e.delta as string).join('')
-  return { ...(created.response ?? {}), status: 'completed', output_text: text }
+  return { ...(created.response ?? {}), status: 'incomplete', output: doneItems, output_text: text }
 }
 
 // 会话里的一条交互记录：请求/响应各带 HTTP 元信息与协议 JSON 正文
