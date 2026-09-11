@@ -80,12 +80,12 @@ function renderSessionJsonc(records: InteractionRecord[]): string {
 export default function App() {
   // ---- 配置区状态 ----
   const [protocol, setProtocol] = useState<Protocol>('anthropic-messages')
-  // 初始值取该协议最近一次成功使用的历史（无历史则留空，不预填厂商默认地址）
-  const [baseUrl, setBaseUrl] = useState(() => getHistory('anthropic-messages', 'url')[0] ?? '')
-  const [apiKey, setApiKey] = useState(() => getHistory('anthropic-messages', 'key')[0] ?? '')
-  // 该协议下已记录的历史列表（驱动 AutoComplete 下拉）
-  const [urlHistory, setUrlHistory] = useState<string[]>(() => getHistory('anthropic-messages', 'url'))
-  const [keyHistory, setKeyHistory] = useState<string[]>(() => getHistory('anthropic-messages', 'key'))
+  // API URL / Key 与协议相互独立：初始取全局历史最近一条（无则留空），切协议时保持不变
+  const [baseUrl, setBaseUrl] = useState(() => getHistory('url')[0] ?? '')
+  const [apiKey, setApiKey] = useState(() => getHistory('key')[0] ?? '')
+  // 全局历史列表（不区分协议，驱动 AutoComplete 下拉）
+  const [urlHistory, setUrlHistory] = useState<string[]>(() => getHistory('url'))
+  const [keyHistory, setKeyHistory] = useState<string[]>(() => getHistory('key'))
   const [models, setModels] = useState<string[]>([])
   const [model, setModel] = useState<string | undefined>(undefined)
   const [fetching, setFetching] = useState(false)
@@ -111,21 +111,17 @@ export default function App() {
   // 当前协议对应的元数据（Endpoint 等）
   const meta = PROTOCOLS.find((p) => p.value === protocol)!
 
-  // 切换协议：加载该协议的历史配置（无历史则留空），重置模型；聊天与日志不受影响
+  // 切换协议：只重置模型（URL / Key 与协议无关，保持不变，历史也可跨协议复用）
   const onProtocolChange = (value: Protocol) => {
     setProtocol(value)
-    setBaseUrl(getHistory(value, 'url')[0] ?? '')
-    setApiKey(getHistory(value, 'key')[0] ?? '')
-    setUrlHistory(getHistory(value, 'url'))
-    setKeyHistory(getHistory(value, 'key'))
     setModels([])
     setModel(undefined)
   }
 
   // 成功使用后记录配置历史：去重置顶（重复值不新增，只置顶），并刷新下拉列表
-  const recordConfigUsed = (p: Protocol, url: string, key: string) => {
-    setUrlHistory(pushHistory(p, 'url', url))
-    setKeyHistory(pushHistory(p, 'key', key))
+  const recordConfigUsed = (url: string, key: string) => {
+    setUrlHistory(pushHistory('url', url))
+    setKeyHistory(pushHistory('key', key))
   }
 
   // 新会话：生成新 sessionId（新日志文件），清空聊天与日志
@@ -248,7 +244,7 @@ export default function App() {
         message.info(`模型列表来自 ${data.usedBaseUrl}`)
       }
       // 成功拉到模型后记录本次使用的配置到历史（去重置顶）
-      recordConfigUsed(protocol, baseUrl, apiKey)
+      recordConfigUsed(baseUrl, apiKey)
       // 拿到列表后默认选中第一个
       if (data.models?.length) {
         setModel(data.models[0])
@@ -301,7 +297,7 @@ export default function App() {
         const data = await res.json()
         appendAssistant(data.text ?? '')
         // 聊天成功：记录本次使用的配置到历史
-        recordConfigUsed(protocol, baseUrl, apiKey)
+        recordConfigUsed(baseUrl, apiKey)
         return
       }
 
@@ -333,7 +329,7 @@ export default function App() {
         }
       }
       // 流式正常读完（收到连接结束）：记录本次使用的配置到历史
-      recordConfigUsed(protocol, baseUrl, apiKey)
+      recordConfigUsed(baseUrl, apiKey)
     } catch (err) {
       message.error(String(err))
       // 失败时移除那个空的助手气泡（配置不记入历史）
@@ -376,6 +372,7 @@ export default function App() {
                 options={urlHistory.map((h) => ({ value: h }))}
                 placeholder="API URL"
                 size="small"
+                popupMatchSelectWidth={false}
                 style={{ width: 320 }}
               />
               <AutoComplete
@@ -384,6 +381,7 @@ export default function App() {
                 options={keyHistory.map((h) => ({ value: h }))}
                 placeholder="API Key"
                 size="small"
+                popupMatchSelectWidth={false}
                 style={{ width: 180 }}
               />
             </Space>
@@ -395,6 +393,7 @@ export default function App() {
                 options={models.map((m) => ({ value: m }))}
                 placeholder="选择或输入模型"
                 size="small"
+                popupMatchSelectWidth={false}
                 style={{ width: 200 }}
               />
               <Button size="small" onClick={fetchModels} loading={fetching}>
