@@ -2,7 +2,7 @@
 // + 微信式聊天区 + 日志面板（实时原样展示当前会话的所有请求与响应）
 
 import { useEffect, useRef, useState } from 'react'
-import { AutoComplete, Button, Card, Flex, Input, Select, Space, Switch, Tabs, Typography, message } from 'antd'
+import { AutoComplete, Button, Card, Flex, Input, Select, Space, Splitter, Switch, Tabs, Typography, message } from 'antd'
 import { PROTOCOLS, type Protocol } from './protocols'
 import { getKeyHistoryForUrl, getLatestKeyForUrl, getModelHistory, getUrlHistory, recordConfigUsed as saveConfigUsed } from './config'
 
@@ -364,9 +364,12 @@ export default function App() {
   const modelOptions = [...new Set([...modelHistory, ...models])].map((m) => ({ value: m }))
 
   return (
-    <Flex gap={12} style={{ height: '100vh', background: '#f5f5f5', boxSizing: 'border-box', padding: 12 }}>
-      {/* ---- 左侧：配置区 + 聊天区（占 40%） ---- */}
-      <Flex vertical gap={12} style={{ flex: '0 0 40%', minWidth: 0 }}>
+    <Flex style={{ height: '100vh', background: '#f5f5f5', boxSizing: 'border-box', padding: 12, overflow: 'hidden' }}>
+      {/* 左右分栏：可拖动调整宽度（左侧默认 40%） */}
+      <Splitter style={{ height: '100%' }}>
+        {/* ---- 左侧面板：配置区 + 聊天区 ---- */}
+        <Splitter.Panel defaultSize="40%" min="25%" max="70%">
+          <Flex vertical gap={12} style={{ height: '100%', minWidth: 0, paddingRight: 6 }}>
         {/* 顶部配置区：三行布局 */}
         <Card size="small" title="Agent Client 配置">
           <Space direction="vertical" size="small" style={{ width: '100%' }}>
@@ -479,102 +482,106 @@ export default function App() {
             </Button>
           </Flex>
         </Card>
-      </Flex>
+          </Flex>
+        </Splitter.Panel>
 
-      {/* ---- 右侧：日志面板（占 60%），双 Tab：整合 / verbose ---- */}
-      <Card size="small" style={{ flex: '0 0 60%', minWidth: 0, display: 'flex', flexDirection: 'column' }} styles={{ body: { flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden', padding: 0 } }}>
-        {/* Tabs 撑满高度：antd Tabs 默认不撑满，用类名控制子元素 */}
-        <style>{`
-          .logs-tabs { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0 12px; }
-          .logs-tabs .ant-tabs-body-holder { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-          .logs-tabs .ant-tabs-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-          .logs-tabs .ant-tabs-content { min-height: 0; }
-          .logs-tabs .ant-tabs-content-active { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-          .logs-tabs .ant-tabs-content-active > div { flex: 1; min-height: 0; display: flex; }
-        `}</style>
-        <Tabs
-          className="logs-tabs"
-          defaultActiveKey="current"
-          size="small"
-          items={[
-            // Tab1（默认）：上下两个区域，各显示最新一次的 Request / Response（JSONC：元信息为注释）
-            {
-              key: 'current',
-              label: '请求/响应',
-              children: (
-                <Flex vertical gap={8} style={{ flex: 1, minHeight: 0 }}>
-                  {/* 本 Tab 自己的清空（只清 Tab1 显示，不影响其他 Tab） */}
-                  <Flex justify="flex-end" style={{ flex: 'none' }}>
-                    <Button size="small" onClick={clearTab1}>
-                      清空
-                    </Button>
-                  </Flex>
-                  {/* Request 区：最新一次请求 */}
-                  <Flex vertical style={{ flex: 1, minHeight: 0, background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
-                    <Text type="secondary" style={{ fontSize: 11, marginBottom: 4 }}>
-                      Request（最新一次）
-                    </Text>
-                    <Flex vertical style={{ flex: 1, minHeight: 0, overflowY: 'auto', fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre' }}>
-                      {requestJsonc || '（暂无请求）'}
+        {/* ---- 右侧面板：日志（双 Tab）---- */}
+        <Splitter.Panel min="25%">
+          <Card size="small" style={{ height: '100%', display: 'flex', flexDirection: 'column', marginLeft: 6 }} styles={{ body: { flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden', padding: 0 } }}>
+            {/* Tabs 撑满高度：antd Tabs 默认不撑满，用类名控制子元素 */}
+            <style>{`
+              .logs-tabs { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0 12px; }
+              .logs-tabs .ant-tabs-body-holder { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+              .logs-tabs .ant-tabs-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+              .logs-tabs .ant-tabs-content { min-height: 0; }
+              .logs-tabs .ant-tabs-content-active { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+              .logs-tabs .ant-tabs-content-active > div { flex: 1; min-height: 0; display: flex; }
+            `}</style>
+            <Tabs
+              className="logs-tabs"
+              defaultActiveKey="current"
+              size="small"
+              items={[
+                // Tab1（默认）：上下两个区域，各显示最新一次的 Request / Response（JSONC：元信息为注释）
+                {
+                  key: 'current',
+                  label: '请求/响应',
+                  children: (
+                    <Flex vertical gap={8} style={{ flex: 1, minHeight: 0 }}>
+                      {/* 本 Tab 自己的清空（只清 Tab1 显示，不影响其他 Tab） */}
+                      <Flex justify="flex-end" style={{ flex: 'none' }}>
+                        <Button size="small" onClick={clearTab1}>
+                          清空
+                        </Button>
+                      </Flex>
+                      {/* Request 区：最新一次请求 */}
+                      <Flex vertical style={{ flex: 1, minHeight: 0, background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
+                        <Text type="secondary" style={{ fontSize: 11, marginBottom: 4 }}>
+                          Request（最新一次）
+                        </Text>
+                        <Flex vertical style={{ flex: 1, minHeight: 0, overflowY: 'auto', fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre' }}>
+                          {requestJsonc || '（暂无请求）'}
+                        </Flex>
+                      </Flex>
+                      {/* Response 区：最新一次响应（流式已聚合为完整响应） */}
+                      <Flex vertical style={{ flex: 1, minHeight: 0, background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
+                        <Text type="secondary" style={{ fontSize: 11, marginBottom: 4 }}>
+                          Response（最新一次，流式已聚合为完整响应）
+                        </Text>
+                        <Flex vertical style={{ flex: 1, minHeight: 0, overflowY: 'auto', fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre' }}>
+                          {responseJsonc || '（暂无响应）'}
+                        </Flex>
+                      </Flex>
                     </Flex>
-                  </Flex>
-                  {/* Response 区：最新一次响应（流式已聚合为完整响应） */}
-                  <Flex vertical style={{ flex: 1, minHeight: 0, background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
-                    <Text type="secondary" style={{ fontSize: 11, marginBottom: 4 }}>
-                      Response（最新一次，流式已聚合为完整响应）
-                    </Text>
-                    <Flex vertical style={{ flex: 1, minHeight: 0, overflowY: 'auto', fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre' }}>
-                      {responseJsonc || '（暂无响应）'}
+                  ),
+                },
+                // Tab2：整个会话 —— JSONC 数组，一个请求配一个回复
+                {
+                  key: 'session',
+                  label: '会话',
+                  children: (
+                    <Flex vertical gap={8} style={{ flex: 1, minHeight: 0 }}>
+                      <Flex justify="flex-end" style={{ flex: 'none' }}>
+                        <Button size="small" onClick={clearTab2}>
+                          清空
+                        </Button>
+                      </Flex>
+                      <Flex
+                        ref={jsonBoxRef}
+                        vertical
+                        style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre', wordBreak: 'break-all' }}
+                      >
+                        {sessionJsonText || '（暂无会话。这里以数组形式展示整个会话：一项 = 一个请求 + 一个回复，均为协议原生的 JSON）'}
+                      </Flex>
                     </Flex>
-                  </Flex>
-                </Flex>
-              ),
-            },
-            // Tab2：整个会话 —— JSONC 数组，一个请求配一个回复
-            {
-              key: 'session',
-              label: '会话',
-              children: (
-                <Flex vertical gap={8} style={{ flex: 1, minHeight: 0 }}>
-                  <Flex justify="flex-end" style={{ flex: 'none' }}>
-                    <Button size="small" onClick={clearTab2}>
-                      清空
-                    </Button>
-                  </Flex>
-                  <Flex
-                    ref={jsonBoxRef}
-                    vertical
-                    style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre', wordBreak: 'break-all' }}
-                  >
-                    {sessionJsonText || '（暂无会话。这里以数组形式展示整个会话：一项 = 一个请求 + 一个回复，均为协议原生的 JSON）'}
-                  </Flex>
-                </Flex>
-              ),
-            },
-            // Tab3：verbose —— 最底层原样日志（完整 headers / body / 每个 SSE 分片）
-            {
-              key: 'verbose',
-              label: 'verbose',
-              children: (
-                <Flex vertical gap={8} style={{ flex: 1, minHeight: 0 }}>
-                  <Flex justify="flex-end" style={{ flex: 'none' }}>
-                    <Button size="small" onClick={clearTab3}>
-                      清空
-                    </Button>
-                  </Flex>
-                  <Flex
-                    ref={logBoxRef}
-                    vertical
-                    style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
-                  >
-                    {logText || '（暂无日志。发送消息或 Fetch Models 后，这里会原样显示所有发出的请求与收到的响应，流式时每个 SSE 分片单独一条）'}
-                  </Flex>
-                </Flex>
-              ),
-            },
-          ]}
-        />
-      </Card>
+                  ),
+                },
+                // Tab3：verbose —— 最底层原样日志（完整 headers / body / 每个 SSE 分片）
+                {
+                  key: 'verbose',
+                  label: 'verbose',
+                  children: (
+                    <Flex vertical gap={8} style={{ flex: 1, minHeight: 0 }}>
+                      <Flex justify="flex-end" style={{ flex: 'none' }}>
+                        <Button size="small" onClick={clearTab3}>
+                          清空
+                        </Button>
+                      </Flex>
+                      <Flex
+                        ref={logBoxRef}
+                        vertical
+                        style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
+                      >
+                        {logText || '（暂无日志。发送消息或 Fetch Models 后，这里会原样显示所有发出的请求与收到的响应，流式时每个 SSE 分片单独一条）'}
+                      </Flex>
+                    </Flex>
+                  ),
+                },
+              ]}
+              />
+          </Card>
+        </Splitter.Panel>
+      </Splitter>
     </Flex>
   )
 }
