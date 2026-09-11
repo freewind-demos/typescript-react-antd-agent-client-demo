@@ -395,19 +395,16 @@ export default function App() {
                 options={models.map((m) => ({ value: m }))}
                 placeholder="选择或输入模型"
                 size="small"
-                style={{ width: 260 }}
+                style={{ width: 200 }}
               />
               <Button size="small" onClick={fetchModels} loading={fetching}>
                 Fetch Models
               </Button>
             </Space>
-            {/* 第三行：流式开关 + 新会话 */}
+            {/* 第三行：流式开关 */}
             <Space wrap>
               <span>流式</span>
               <Switch size="small" checked={stream} onChange={setStream} />
-              <Button size="small" onClick={newSession}>
-                新会话
-              </Button>
             </Space>
           </Space>
         </Card>
@@ -416,6 +413,11 @@ export default function App() {
         <Card
           size="small"
           title="聊天"
+          extra={
+            <Button size="small" onClick={newSession}>
+              新会话
+            </Button>
+          }
           style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
           styles={{ body: { flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' } }}
         >
