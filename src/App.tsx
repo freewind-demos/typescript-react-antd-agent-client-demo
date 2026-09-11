@@ -190,91 +190,95 @@ export default function App() {
   }
 
   return (
-    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column', padding: 12, gap: 12, background: '#f5f5f5', boxSizing: 'border-box' }}>
-      {/* ---- 顶部配置区 ---- */}
-      <Card size="small" title="Agent Client 配置">
-        <Space wrap>
-          <span>协议</span>
-          <Select
-            value={protocol}
-            onChange={onProtocolChange}
-            options={PROTOCOLS.map((p) => ({ value: p.value, label: p.label }))}
-            style={{ width: 220 }}
-          />
-          <Input placeholder="API URL" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} style={{ width: 320 }} />
-          <Input.Password placeholder="API Key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} style={{ width: 260 }} />
-          <Button onClick={fetchModels} loading={fetching}>
-            Fetch Models
-          </Button>
-          <Select
-            placeholder="选择模型"
-            value={model}
-            onChange={setModel}
-            options={models.map((m) => ({ value: m, label: m }))}
-            style={{ width: 260 }}
-            showSearch
-          />
-          <span>流式</span>
-          <Switch checked={stream} onChange={setStream} />
-          <Button onClick={newSession}>新会话</Button>
-        </Space>
-      </Card>
+    <div style={{ height: '100vh', display: 'flex', flexDirection: 'row', background: '#f5f5f5', boxSizing: 'border-box', padding: 12, gap: 12 }}>
+      {/* ---- 左侧：配置区 + 聊天区 ---- */}
+      <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {/* 顶部配置区 */}
+        <Card size="small" title="Agent Client 配置">
+          <Space wrap>
+            <span>协议</span>
+            <Select
+              value={protocol}
+              onChange={onProtocolChange}
+              options={PROTOCOLS.map((p) => ({ value: p.value, label: p.label }))}
+              style={{ width: 220 }}
+            />
+            <Input placeholder="API URL" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} style={{ width: 320 }} />
+            <Input.Password placeholder="API Key" value={apiKey} onChange={(e) => setApiKey(e.target.value)} style={{ width: 260 }} />
+            <Button onClick={fetchModels} loading={fetching}>
+              Fetch Models
+            </Button>
+            <Select
+              placeholder="选择模型"
+              value={model}
+              onChange={setModel}
+              options={models.map((m) => ({ value: m, label: m }))}
+              style={{ width: 260 }}
+              showSearch
+            />
+            <span>流式</span>
+            <Switch checked={stream} onChange={setStream} />
+            <Button onClick={newSession}>新会话</Button>
+          </Space>
+        </Card>
 
-      {/* ---- 中间聊天区 ---- */}
-      <Card
-        size="small"
-        title="聊天"
-        style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
-        styles={{ body: { flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' } }}
-      >
-        <div style={{ flex: 1, overflowY: 'auto', padding: 4 }}>
-          {messages.length === 0 && (
-            <div style={{ color: '#999', textAlign: 'center', marginTop: 40 }}>填写配置并 Fetch Models 后，开始聊天吧</div>
-          )}
-          {messages.map((m, i) => (
-            <div key={i} style={{ display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start', marginBottom: 10 }}>
-              <div
-                style={{
-                  maxWidth: '70%',
-                  padding: '8px 12px',
-                  borderRadius: 8,
-                  background: m.role === 'user' ? '#1677ff' : '#ffffff',
-                  color: m.role === 'user' ? '#ffffff' : '#000000',
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-word',
-                  boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
-                }}
-              >
-                {m.content || (i === messages.length - 1 && sending ? '…' : '')}
+        {/* 聊天区 */}
+        <Card
+          size="small"
+          title="聊天"
+          style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}
+          styles={{ body: { flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' } }}
+        >
+          <div style={{ flex: 1, overflowY: 'auto', padding: 4 }}>
+            {messages.length === 0 && (
+              <div style={{ color: '#999', textAlign: 'center', marginTop: 40 }}>填写配置并 Fetch Models 后，开始聊天吧</div>
+            )}
+            {messages.map((m, i) => (
+              <div key={i} style={{ display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start', marginBottom: 10 }}>
+                <div
+                  style={{
+                    maxWidth: '70%',
+                    padding: '8px 12px',
+                    borderRadius: 8,
+                    background: m.role === 'user' ? '#1677ff' : '#ffffff',
+                    color: m.role === 'user' ? '#ffffff' : '#000000',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word',
+                    boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
+                  }}
+                >
+                  {m.content || (i === messages.length - 1 && sending ? '…' : '')}
+                </div>
               </div>
-            </div>
-          ))}
-        </div>
-        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-          <TextArea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="输入消息，Enter 发送，Shift+Enter 换行"
-            autoSize={{ minRows: 1, maxRows: 4 }}
-            onPressEnter={(e) => {
-              if (!e.shiftKey) {
-                e.preventDefault()
-                handleSend()
-              }
-            }}
-          />
-          <Button type="primary" onClick={handleSend} loading={sending}>
-            发送
-          </Button>
-        </div>
-      </Card>
+            ))}
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <TextArea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="输入消息，Enter 发送，Shift+Enter 换行"
+              autoSize={{ minRows: 1, maxRows: 4 }}
+              onPressEnter={(e) => {
+                if (!e.shiftKey) {
+                  e.preventDefault()
+                  handleSend()
+                }
+              }}
+            />
+            <Button type="primary" onClick={handleSend} loading={sending}>
+              发送
+            </Button>
+          </div>
+        </Card>
+      </div>
 
-      {/* ---- 底部日志面板：max-height + 滚动条，原样展示 ---- */}
-      <Card size="small" title="日志（从 Client 视角原样记录 Request / Response / SSE 分片）">
+      {/* ---- 右侧：日志面板（固定宽度，撑满高度滚动，原样展示） ---- */}
+      <Card size="small" title="日志（原样记录 Request / Response / SSE 分片）" style={{ width: 480, display: 'flex', flexDirection: 'column' }} styles={{ body: { flex: 1, minHeight: 0, display: 'flex' } }}>
         <div
           ref={logBoxRef}
           style={{
-            maxHeight: 260,
+            flex: 1,
+            minHeight: 0,
             overflowY: 'auto',
             background: '#111111',
             color: '#e6e6e6',

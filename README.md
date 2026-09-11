@@ -20,14 +20,13 @@
 # 安装依赖
 pnpm install
 
-# 启动 Node Server（端口 3001，负责调用 SDK 与记录日志）
-pnpm start
-
-# 另开一个终端，启动前端（端口 5173）
-pnpm dev
+# 一条命令同时启动前端和后端（后端作为 Vite 中间件挂在同一端口，共用一个 5173）
+pnpm run dev
 ```
 
 浏览器打开 `http://localhost:5173`。
+
+（可选）也可以单独只跑后端：`pnpm start`（独立端口 3001，供需要前后端分离的场景使用；正常开发不需要）。
 
 使用步骤：
 
@@ -50,20 +49,24 @@ pnpm dev
 ### 架构
 
 ```
-前端 (React + antd)          Node Server (express)             真实 AI API
-┌─────────────────┐         ┌─────────────────────────┐
-│ 配置区/聊天区    │  HTTP   │ /api/anthropic/messages │   SDK 发请求
-│ 日志面板(SSE)   │ ──────► │ /api/openai/...         │ ──────────► 上游
-└─────────────────┘         │   └─ 官方 SDK ─┐         │
-                            │                ▼         │
-                            │        日志中间件(包装 fetch) │
-                            │                │         │
-                            │  写 logs/<sessionId>.log   │
-                            │  SSE 实时推送 /api/logs/stream
-                            └─────────────────────────┘
+前端 (React + antd)                真实 AI API
+┌──────────────────────┐         ┌──────────────┐
+│ 左侧：配置区 + 聊天区  │         │              │
+│ 右侧：日志面板        │  HTTP   │  上游服务     │
+│                      │ ──────► │              │
+└──────────┬───────────┘         └──────────────┘
+           │ 同端口(Vite 中间件挂 express)
+           ▼
+┌──────────────────────────────┐
+│ Vite dev server (5173，单端口) │
+│  └─ express 中间件            │
+│      └─ 官方 SDK ──► 日志中间件(包装 fetch) ──► 上游
+│      └─ 写 logs/<sessionId>.log
+│      └─ SSE 实时推送 /api/logs/stream
+└──────────────────────────────┘
 ```
 
-前端只做界面；Server 里用官方 SDK（`@anthropic-ai/sdk` 和 `openai`）真正发请求，保证协议格式正确；日志中间件包在 SDK 底层，两者互不干扰。
+前端与后端**共用同一个端口**：`pnpm run dev` 时 Vite 启动后，通过自定义插件把 express 应用挂进 Vite 的中间件链（`server.middlewares.use(app)`），`/api/*` 请求由 express 处理，其余请求（静态资源、HMR）继续走 Vite——所以单端口、单命令即可开发调试。
 
 ### 三种协议
 
@@ -100,6 +103,8 @@ pnpm dev
 - `src/server/middleware.ts` — 日志中间件（包装 fetch、tee 分流、逐 chunk 记录）
 - `src/server/logger.ts` — 日志写文件 + SSE 广播
 - `src/server/clients.ts` — 三种协议的 SDK 封装与文本提取
-- `server.ts` — express 路由（聊天/模型/日志接口）
-- `src/App.tsx` — 前端界面（配置区、微信式聊天、日志面板）
+- `src/server/app.ts` — express 应用（聊天/模型/日志接口），dev 时作为 Vite 中间件挂载
+- `server.ts` — 可选独立后端入口（`pnpm start`，端口 3001）
+- `vite.config.ts` — Vite 配置，含把 express 挂进 dev server 中间件的插件
+- `src/App.tsx` — 前端界面（左侧配置区 + 微信式聊天，右侧日志面板）
 - `src/protocols.ts` — 三种协议与 Endpoint 的映射定义
