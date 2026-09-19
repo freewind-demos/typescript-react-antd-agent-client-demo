@@ -1,7 +1,8 @@
 // 三种协议的定义：标签、默认 API 地址、对应的 Server Endpoint
 // 前端只认协议标识，具体请求走哪个 Endpoint 由这里映射
 
-export type Protocol = 'anthropic-messages' | 'openai-chat-completions' | 'openai-responses'
+// 协议枚举：书写顺序与 PROTOCOLS 列表一致（OpenAI 在前，Anthropic 最后）
+export type Protocol = 'openai-chat-completions' | 'openai-responses' | 'anthropic-messages'
 
 export type ProtocolMeta = {
   value: Protocol

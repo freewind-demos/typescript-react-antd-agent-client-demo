@@ -266,7 +266,8 @@ export class LogManager {
       chunkJsons = evs
       if (evs.length > 0) {
         state.events.push(...evs)
-        currentResponse = aggregateResponse(state.protocol ?? 'anthropic-messages', state.events)
+        // 兜底协议取列表第一个（正常情况下 protocol 一定由请求带入，这里几乎不会用到）
+        currentResponse = aggregateResponse(state.protocol ?? 'openai-chat-completions', state.events)
         const last = state.interactions[state.interactions.length - 1]
         if (last) {
           last.response = {

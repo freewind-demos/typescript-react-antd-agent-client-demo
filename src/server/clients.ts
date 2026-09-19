@@ -6,8 +6,8 @@ import OpenAI from 'openai'
 import { createLoggingFetch, type LogEvent } from './middleware.js'
 import { BASH_TOOL_ANTHROPIC, BASH_TOOL_CHAT, BASH_TOOL_RESPONSES, BASH_TOOL_NAME, executeBash, formatBashResult, type BashResult } from './tools.js'
 
-// 支持的三种协议标识
-export type Protocol = 'anthropic-messages' | 'openai-chat-completions' | 'openai-responses'
+// 支持的三种协议标识（书写顺序与 protocols.ts 一致：OpenAI 在前，Anthropic 最后）
+export type Protocol = 'openai-chat-completions' | 'openai-responses' | 'anthropic-messages'
 
 // 聊天请求的统一入参（三种协议共用）
 export type ChatRequest = {
