@@ -533,7 +533,8 @@ export default function App() {
                 const background = isCall ? '#f0f0f0' : failed ? '#fff1f0' : '#f6ffed'
                 const borderColor = isCall ? '#d9d9d9' : failed ? '#ffa39e' : '#b7eb8f'
                 return (
-                  <Flex key={i} justify="flex-start" style={{ marginBottom: 10 }}>
+                  // 方向对齐：tool call 靠左（模型发起），tool result 靠右（会被作为下一轮 request 发回模型）
+                  <Flex key={i} justify={isCall ? 'flex-start' : 'flex-end'} style={{ marginBottom: 10 }}>
                     <Flex
                       vertical
                       style={{
