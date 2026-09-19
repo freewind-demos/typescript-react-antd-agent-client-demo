@@ -114,6 +114,9 @@ async function chatWithAnthropic(req: ChatRequest): Promise<ChatResult> {
 
   // 非流式：内部跑完整 agent loop，只在最后一轮（无工具调用）返回文本
   if (!req.stream) {
+    // 工具调用轮里模型可能先输出一段正文（preamble），这里累积下来与最终回答一起返回，
+    // 保持与流式路径一致（流式会把 preamble 直接推给前端）
+    let preamble = ''
     for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
       const res = await client.messages.create({
         model: req.model,
@@ -125,9 +128,10 @@ async function chatWithAnthropic(req: ChatRequest): Promise<ChatResult> {
       const toolUses = res.content.filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use')
       // 本轮没有工具调用：即为最终回答
       if (toolUses.length === 0) {
-        return { stream: false, text: extractAnthropicText(res.content) }
+        return { stream: false, text: preamble + extractAnthropicText(res.content) }
       }
-      // 回放 assistant 消息（含 tool_use），再把每个工具结果作为 user 消息回传
+      // 本轮是工具调用轮：保留其正文，再回放 assistant 消息（含 tool_use）并把工具结果作为 user 消息回传
+      preamble += extractAnthropicText(res.content)
       conversation.push({ role: 'assistant', content: res.content })
       const toolResults: Anthropic.ToolResultBlockParam[] = []
       for (const toolUse of toolUses) {
@@ -306,11 +310,10 @@ async function chatWithOpenAiResponses(req: ChatRequest): Promise<ChatResult> {
       if (calls.length === 0) {
         return { stream: false, text: res.output_text }
       }
-      // 先把所有 function_call 回放进 input，再追加各自的 function_call_output
+      // function_call 与其 function_call_output 成对追加（保持模型返回的顺序；
+      // 并行工具调用时也必须成对，不能先放全部 call 再放全部 output）
       for (const call of calls) {
         input.push({ type: 'function_call', call_id: call.call_id, name: call.name, arguments: call.arguments })
-      }
-      for (const call of calls) {
         const result = await runBashTool(parseToolArgs(call.arguments), req.onEvent)
         input.push({ type: 'function_call_output', call_id: call.call_id, output: formatBashResult(result) })
       }
@@ -336,11 +339,9 @@ async function chatWithOpenAiResponses(req: ChatRequest): Promise<ChatResult> {
         }
         // 本轮无工具调用：整个 agent loop 结束
         if (calls.length === 0) return
-        // 先把所有 function_call 回放进 input，再追加各自的 function_call_output
+        // function_call 与其 function_call_output 成对追加（保持模型返回的顺序）
         for (const call of calls) {
           input.push({ type: 'function_call', call_id: call.call_id, name: call.name, arguments: call.arguments })
-        }
-        for (const call of calls) {
           const result = await runBashTool(parseToolArgs(call.arguments), req.onEvent)
           input.push({ type: 'function_call_output', call_id: call.call_id, output: formatBashResult(result) })
         }

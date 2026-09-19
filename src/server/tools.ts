@@ -110,7 +110,10 @@ export function executeBash(input: BashInput): Promise<BashResult> {
         if (error) {
           exitCode = typeof error.code === 'number' ? error.code : -1
           if (error.killed) {
-            extraNote = `[process killed: ${error.signal ?? 'unknown signal'}, timeout was ${timeout} ms]`
+            // 被 kill 的原因：stdio 缓冲超限，或 exec 的 timeout 到点
+            const reason =
+              error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' ? `output exceeded maxBuffer (${MAX_BUFFER} bytes)` : `timeout was ${timeout} ms`
+            extraNote = `[process killed: ${error.signal ?? 'unknown signal'}, ${reason}]`
           } else if (exitCode === -1) {
             extraNote = `[failed to run command: ${error.message}]`
           }
