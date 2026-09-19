@@ -12,8 +12,9 @@ const { Text } = Typography
 // 一次 Bash 工具调用的展示信息
 type ToolCallInfo = { name: string; input: { command: string; timeout?: number }; output: string; exitCode: number }
 
-// 聊天消息结构：角色 + 内容；tool 类型用于展示工具调用气泡（content 为空，细节在 toolInfo）
-type ChatMessage = { role: 'user' | 'assistant' | 'tool'; content: string; toolInfo?: ToolCallInfo }
+// 聊天消息结构：角色 + 内容；tool 类型用于展示工具调用（content 为空，细节在 toolInfo）
+// toolPhase 区分两条独立气泡：call = 模型发起的命令，result = 命令的执行结果
+type ChatMessage = { role: 'user' | 'assistant' | 'tool'; content: string; toolInfo?: ToolCallInfo; toolPhase?: 'call' | 'result' }
 
 // 会话里的一条交互记录：请求/响应各带 HTTP 元信息与协议 JSON 正文
 type InteractionRecord = {
@@ -231,14 +232,19 @@ export default function App() {
           }
           setSessionJson(patchTools)
           setCurrentPair((prev) => (prev ? { ...prev, tools: [...(prev.tools ?? []), toolCall] } : prev))
+          // 拆成两条独立气泡：先 tool call（命令），再 tool result（执行结果），
+          // 都排在空的助手气泡之前，形成"用户 → 调用 → 结果 → 助手回答"的过程
           setMessages((prev) => {
             const next = [...prev]
-            const toolMessage: ChatMessage = { role: 'tool', content: '', toolInfo: toolCall }
+            const toolMessages: ChatMessage[] = [
+              { role: 'tool', toolPhase: 'call', content: '', toolInfo: toolCall },
+              { role: 'tool', toolPhase: 'result', content: '', toolInfo: toolCall },
+            ]
             const lastIndex = next.length - 1
             if (lastIndex >= 0 && next[lastIndex].role === 'assistant') {
-              next.splice(lastIndex, 0, toolMessage)
+              next.splice(lastIndex, 0, ...toolMessages)
             } else {
-              next.push(toolMessage)
+              next.push(...toolMessages)
             }
             return next
           })
@@ -519,33 +525,45 @@ export default function App() {
                 <Text type="secondary">填写配置并 Fetch Models 后，开始聊天吧</Text>
               </Flex>
             )}
-            {messages.map((m, i) =>
-              m.role === 'tool' ? (
-                // 工具调用气泡：显示执行的命令与结果
-                <Flex key={i} justify="flex-start" style={{ marginBottom: 10 }}>
-                  <Flex
-                    vertical
-                    style={{
-                      maxWidth: '85%',
-                      padding: '8px 12px',
-                      borderRadius: 8,
-                      background: '#f0f0f0',
-                      border: '1px solid #d9d9d9',
-                      fontFamily: 'Menlo, Consolas, monospace',
-                      fontSize: 12,
-                    }}
-                  >
-                    <Text type="secondary" style={{ fontSize: 11 }}>
-                      🔧 {m.toolInfo?.name}
-                    </Text>
-                    <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>$ {m.toolInfo?.input.command}</div>
-                    <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', marginTop: 4, color: '#555' }}>{m.toolInfo?.output}</div>
-                    <Text type="secondary" style={{ fontSize: 11, marginTop: 4 }}>
-                      exit code: {m.toolInfo?.exitCode}
-                    </Text>
+            {messages.map((m, i) => {
+              // 工具相关气泡：call = 模型发起的命令，result = 执行结果，两条独立气泡、样式区分
+              if (m.role === 'tool') {
+                const isCall = m.toolPhase === 'call'
+                const failed = !isCall && (m.toolInfo?.exitCode ?? 0) !== 0
+                const background = isCall ? '#f0f0f0' : failed ? '#fff1f0' : '#f6ffed'
+                const borderColor = isCall ? '#d9d9d9' : failed ? '#ffa39e' : '#b7eb8f'
+                return (
+                  <Flex key={i} justify="flex-start" style={{ marginBottom: 10 }}>
+                    <Flex
+                      vertical
+                      style={{
+                        maxWidth: '85%',
+                        padding: '8px 12px',
+                        borderRadius: 8,
+                        background,
+                        border: `1px solid ${borderColor}`,
+                        fontFamily: 'Menlo, Consolas, monospace',
+                        fontSize: 12,
+                      }}
+                    >
+                      <Text type="secondary" style={{ fontSize: 11 }}>
+                        {isCall ? `🔧 tool call — ${m.toolInfo?.name}` : '↩ tool result'}
+                      </Text>
+                      {isCall ? (
+                        <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>$ {m.toolInfo?.input.command}</div>
+                      ) : (
+                        <>
+                          <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{m.toolInfo?.output}</div>
+                          <Text type="secondary" style={{ fontSize: 11, marginTop: 4 }}>
+                            exit code: {m.toolInfo?.exitCode}
+                          </Text>
+                        </>
+                      )}
+                    </Flex>
                   </Flex>
-                </Flex>
-              ) : (
+                )
+              }
+              return (
                 <Flex key={i} justify={m.role === 'user' ? 'flex-end' : 'flex-start'} style={{ marginBottom: 10 }}>
                   <Flex
                     style={{
@@ -562,8 +580,8 @@ export default function App() {
                     {m.content || (i === messages.length - 1 && sending ? '…' : '')}
                   </Flex>
                 </Flex>
-              ),
-            )}
+              )
+            })}
           </Flex>
           <Flex gap={8} style={{ marginTop: 8 }}>
             <TextArea
