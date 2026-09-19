@@ -166,7 +166,7 @@ export default function App() {
   // 三个 Tab 各自的清空：只清自己的显示数据，互不影响
   const clearTab1 = () => setCurrentPair(null) // Tab1「请求/响应」
   const clearTab2 = () => setSessionJson([]) // Tab2「会话」
-  const clearTab3 = () => setLogText('') // Tab3「verbose」
+  const clearTab3 = () => setLogText('') // Tab3「raw」
 
   // 清空当前选中的 Tab（按钮在 Tab 标题行最右侧）
   const clearCurrentTab = () => {
@@ -719,10 +719,10 @@ export default function App() {
                     </Flex>
                   ),
                 },
-                // Tab3：verbose —— 最底层原样日志（完整 headers / body / 每个 SSE 分片）
+                // Tab3：raw —— 最底层原样日志（完整 headers / body / 每个 SSE 分片）
                 {
-                  key: 'verbose',
-                  label: 'verbose',
+                  key: 'raw',
+                  label: 'raw',
                   children: (
                     <Flex vertical gap={8} style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
                       <Flex
