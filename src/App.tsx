@@ -220,7 +220,8 @@ export default function App() {
           setSessionJson(patch)
           setCurrentPair((prev) => (prev ? { ...prev, response: { status: data.status, statusText: data.statusText, headers: data.headers ?? {}, body: prev.response?.body ?? null } } : prev))
         }
-        // 工具调用：挂到当前交互记录，并在聊天区插入一个工具气泡（放在空的助手气泡之前）
+        // 工具调用：挂到当前交互记录，并在聊天区按真实时序切分/插入工具气泡
+        //（preamble 留在工具之前，工具之后新起一个助手气泡接续后续回答）
         if (data.type === 'tool') {
           const toolCall: ToolCallInfo = { name: data.name, input: data.input, output: data.output, exitCode: data.exitCode }
           const patchTools = (prev: InteractionRecord[]) => {
@@ -232,19 +233,30 @@ export default function App() {
           }
           setSessionJson(patchTools)
           setCurrentPair((prev) => (prev ? { ...prev, tools: [...(prev.tools ?? []), toolCall] } : prev))
-          // 拆成两条独立气泡：先 tool call（命令），再 tool result（执行结果），
-          // 都排在空的助手气泡之前，形成"用户 → 调用 → 结果 → 助手回答"的过程
+          // 在工具调用点按真实时序切分助手气泡：
+          // 模型调用工具前会先输出一段解释（preamble，已随流式追加进当前助手气泡），
+          // 它在时序上位于工具调用之前；工具调用之后的文字（含最终回答）属于新的助手气泡。
+          // 因此保留已有 preamble 气泡在工具之前，工具之后追加一个新的空助手气泡，
+          // 拆成两条独立工具气泡（先 tool call 命令，再 tool result 结果），
+          // 形成正确时序：user → 解释 → tool call → tool result → 最终回答
           setMessages((prev) => {
             const next = [...prev]
             const toolMessages: ChatMessage[] = [
               { role: 'tool', toolPhase: 'call', content: '', toolInfo: toolCall },
               { role: 'tool', toolPhase: 'result', content: '', toolInfo: toolCall },
             ]
+            const newAssistant: ChatMessage = { role: 'assistant', content: '' }
             const lastIndex = next.length - 1
-            if (lastIndex >= 0 && next[lastIndex].role === 'assistant') {
-              next.splice(lastIndex, 0, ...toolMessages)
+            const last = lastIndex >= 0 ? next[lastIndex] : undefined
+            if (last?.role === 'assistant' && last.content !== '') {
+              // 本轮有 preamble：保留其独立气泡（位于工具之前），其后插入工具 + 新空助手气泡
+              next.splice(lastIndex + 1, 0, ...toolMessages, newAssistant)
+            } else if (last?.role === 'assistant') {
+              // 空助手占位（本轮无 preamble）：原地替换为 工具 + 新空助手气泡
+              next.splice(lastIndex, 1, ...toolMessages, newAssistant)
             } else {
-              next.push(...toolMessages)
+              // 兜底：尾部不是助手气泡时直接追加
+              next.push(...toolMessages, newAssistant)
             }
             return next
           })
@@ -331,10 +343,22 @@ export default function App() {
       return
     }
     const userMessage: ChatMessage = { role: 'user', content: text }
-    // 发给 Server 的历史：过滤掉 tool 气泡（Server 只认 user/assistant/system）
-    const history = messages.filter((m) => m.role !== 'tool').map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+    // 发给 Server 的历史：过滤掉 tool 气泡（Server 只认 user/assistant/system），
+    // 并合并连续的同角色消息、丢弃空内容 —— 工具调用点会把助手气泡切成多段
+    //（preamble / 最终回答），这里合并回单条，避免上游因角色不交替而报错
+    const history: Array<{ role: 'user' | 'assistant'; content: string }> = []
+    for (const m of messages) {
+      if (m.role === 'tool' || !m.content) continue
+      const prev = history[history.length - 1]
+      if (prev && prev.role === m.role) {
+        prev.content += m.content
+      } else {
+        history.push({ role: m.role, content: m.content })
+      }
+    }
     const requestMessages = [...history, { role: 'user' as const, content: text }]
-    // 聊天区追加用户消息与空的助手气泡（流式时逐段填充；工具气泡会插在助手气泡之前）
+    // 聊天区追加用户消息与空的助手气泡（流式时逐段填充；工具气泡会在调用点按真实时序插入，
+    // 并在其后新起助手气泡接续后续回答）
     setMessages((prev) => [...prev, userMessage, { role: 'assistant', content: '' }])
     setInput('')
     setSending(true)
