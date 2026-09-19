@@ -14,6 +14,8 @@ export type LogEvent =
   | { type: 'error'; message: string; timestamp: number }
   // 响应体读取完毕
   | { type: 'end'; timestamp: number }
+  // 工具调用：本地执行 Bash 命令的入参与结果（不属于 HTTP 层，但同属过程日志）
+  | { type: 'tool'; name: string; input: { command: string; timeout?: number }; output: string; exitCode: number; timestamp: number }
 
 // 我们自己用的 fetch 函数签名（与 SDK 内部 Fetch 类型一致）
 export type LoggingFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>

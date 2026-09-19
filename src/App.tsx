@@ -9,13 +9,18 @@ import { getKeyHistoryForUrl, getLatestKeyForUrl, getModelHistory, getUrlHistory
 const { TextArea } = Input
 const { Text } = Typography
 
-// 聊天消息结构：角色 + 内容
-type ChatMessage = { role: 'user' | 'assistant'; content: string }
+// 一次 Bash 工具调用的展示信息
+type ToolCallInfo = { name: string; input: { command: string; timeout?: number }; output: string; exitCode: number }
+
+// 聊天消息结构：角色 + 内容；tool 类型用于展示工具调用气泡（content 为空，细节在 toolInfo）
+type ChatMessage = { role: 'user' | 'assistant' | 'tool'; content: string; toolInfo?: ToolCallInfo }
 
 // 会话里的一条交互记录：请求/响应各带 HTTP 元信息与协议 JSON 正文
 type InteractionRecord = {
   request: { method: string; url: string; headers: Record<string, string>; body: unknown } | null
   response: { status: number; statusText: string; headers: Record<string, string>; body: unknown } | null
+  // 这一轮请求过程中触发的工具调用
+  tools?: ToolCallInfo[]
 }
 
 // headers 转成若干行注释文本
@@ -70,7 +75,16 @@ function renderInteractionJsonc(item: InteractionRecord): string {
         ...renderBodyFieldLines(item.response.body),
       ]
     : ['      null']
-  return ['  {', '    "request": {', ...requestLines, '    },', '    "response": {', ...responseLines, '    }', '  }'].join('\n')
+  const hasTools = !!item.tools && item.tools.length > 0
+  const lines = ['  {', '    "request": {', ...requestLines, '    },', '    "response": {', ...responseLines, hasTools ? '    },' : '    }']
+  if (item.tools && item.tools.length > 0) {
+    // 工具调用以正常 JSON 字段附在 response 之后（含 command 入参与执行结果）
+    const toolsJson = JSON.stringify(item.tools, null, 2)
+    const toolsLines = toolsJson.split('\n').map((line, index) => (index === 0 ? line : `    ${line}`))
+    lines.push(`    "tools": ${toolsLines[0]}`, ...toolsLines.slice(1))
+  }
+  lines.push('  }')
+  return lines.join('\n')
 }
 
 // 把整个会话渲染成 JSONC 数组：旧项在前、新项在后（持续追加）
@@ -205,6 +219,30 @@ export default function App() {
           setSessionJson(patch)
           setCurrentPair((prev) => (prev ? { ...prev, response: { status: data.status, statusText: data.statusText, headers: data.headers ?? {}, body: prev.response?.body ?? null } } : prev))
         }
+        // 工具调用：挂到当前交互记录，并在聊天区插入一个工具气泡（放在空的助手气泡之前）
+        if (data.type === 'tool') {
+          const toolCall: ToolCallInfo = { name: data.name, input: data.input, output: data.output, exitCode: data.exitCode }
+          const patchTools = (prev: InteractionRecord[]) => {
+            if (prev.length === 0) return prev
+            const next = [...prev]
+            const last = next[next.length - 1]
+            next[next.length - 1] = { ...last, tools: [...(last.tools ?? []), toolCall] }
+            return next
+          }
+          setSessionJson(patchTools)
+          setCurrentPair((prev) => (prev ? { ...prev, tools: [...(prev.tools ?? []), toolCall] } : prev))
+          setMessages((prev) => {
+            const next = [...prev]
+            const toolMessage: ChatMessage = { role: 'tool', content: '', toolInfo: toolCall }
+            const lastIndex = next.length - 1
+            if (lastIndex >= 0 && next[lastIndex].role === 'assistant') {
+              next.splice(lastIndex, 0, toolMessage)
+            } else {
+              next.push(toolMessage)
+            }
+            return next
+          })
+        }
         // 聚合后的完整响应正文：更新最后一条交互的 response.body
         if (data.currentResponse !== undefined && data.currentResponse !== null) {
           const aggregated = data.currentResponse
@@ -287,10 +325,11 @@ export default function App() {
       return
     }
     const userMessage: ChatMessage = { role: 'user', content: text }
-    // 请求携带的消息：历史 + 新用户消息
-    const requestMessages = [...messages, userMessage]
-    // 先放一个空的助手气泡，流式时逐段填充（打字机效果）
-    setMessages([...requestMessages, { role: 'assistant', content: '' }])
+    // 发给 Server 的历史：过滤掉 tool 气泡（Server 只认 user/assistant/system）
+    const history = messages.filter((m) => m.role !== 'tool').map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+    const requestMessages = [...history, { role: 'user' as const, content: text }]
+    // 聊天区追加用户消息与空的助手气泡（流式时逐段填充；工具气泡会插在助手气泡之前）
+    setMessages((prev) => [...prev, userMessage, { role: 'assistant', content: '' }])
     setInput('')
     setSending(true)
     try {
@@ -454,24 +493,51 @@ export default function App() {
                 <Text type="secondary">填写配置并 Fetch Models 后，开始聊天吧</Text>
               </Flex>
             )}
-            {messages.map((m, i) => (
-              <Flex key={i} justify={m.role === 'user' ? 'flex-end' : 'flex-start'} style={{ marginBottom: 10 }}>
-                <Flex
-                  style={{
-                    maxWidth: '70%',
-                    padding: '8px 12px',
-                    borderRadius: 8,
-                    background: m.role === 'user' ? '#1677ff' : '#ffffff',
-                    color: m.role === 'user' ? '#ffffff' : '#000000',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                    boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
-                  }}
-                >
-                  {m.content || (i === messages.length - 1 && sending ? '…' : '')}
+            {messages.map((m, i) =>
+              m.role === 'tool' ? (
+                // 工具调用气泡：显示执行的命令与结果
+                <Flex key={i} justify="flex-start" style={{ marginBottom: 10 }}>
+                  <Flex
+                    vertical
+                    style={{
+                      maxWidth: '85%',
+                      padding: '8px 12px',
+                      borderRadius: 8,
+                      background: '#f0f0f0',
+                      border: '1px solid #d9d9d9',
+                      fontFamily: 'Menlo, Consolas, monospace',
+                      fontSize: 12,
+                    }}
+                  >
+                    <Text type="secondary" style={{ fontSize: 11 }}>
+                      🔧 {m.toolInfo?.name}
+                    </Text>
+                    <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>$ {m.toolInfo?.input.command}</div>
+                    <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all', marginTop: 4, color: '#555' }}>{m.toolInfo?.output}</div>
+                    <Text type="secondary" style={{ fontSize: 11, marginTop: 4 }}>
+                      exit code: {m.toolInfo?.exitCode}
+                    </Text>
+                  </Flex>
                 </Flex>
-              </Flex>
-            ))}
+              ) : (
+                <Flex key={i} justify={m.role === 'user' ? 'flex-end' : 'flex-start'} style={{ marginBottom: 10 }}>
+                  <Flex
+                    style={{
+                      maxWidth: '70%',
+                      padding: '8px 12px',
+                      borderRadius: 8,
+                      background: m.role === 'user' ? '#1677ff' : '#ffffff',
+                      color: m.role === 'user' ? '#ffffff' : '#000000',
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
+                      boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
+                    }}
+                  >
+                    {m.content || (i === messages.length - 1 && sending ? '…' : '')}
+                  </Flex>
+                </Flex>
+              ),
+            )}
           </Flex>
           <Flex gap={8} style={{ marginTop: 8 }}>
             <TextArea

@@ -4,7 +4,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
 import { createLoggingFetch, type LogEvent } from './middleware.js'
-import { BASH_TOOL_ANTHROPIC, BASH_TOOL_CHAT, BASH_TOOL_RESPONSES, executeBash, formatBashResult, type BashResult } from './tools.js'
+import { BASH_TOOL_ANTHROPIC, BASH_TOOL_CHAT, BASH_TOOL_RESPONSES, BASH_TOOL_NAME, executeBash, formatBashResult, type BashResult } from './tools.js'
 
 // 支持的三种协议标识
 export type Protocol = 'anthropic-messages' | 'openai-chat-completions' | 'openai-responses'
@@ -63,13 +63,23 @@ function parseToolArgs(json: string): unknown {
   }
 }
 
-// 按 Bash 工具约定执行命令：command 缺失/非法时直接返回错误结果，不真正执行
-async function runBashTool(input: unknown): Promise<BashResult> {
+// 按 Bash 工具约定执行命令：command 缺失/非法时直接返回错误结果，不真正执行。
+// 无论成功与否都触发一条 tool 事件（用于日志面板与前端工具气泡）。
+async function runBashTool(input: unknown, onEvent: (event: LogEvent) => void): Promise<BashResult> {
   const { command, timeout } = (input ?? {}) as { command?: unknown; timeout?: unknown }
-  if (typeof command !== 'string' || command.trim() === '') {
-    return { output: 'error: the "command" argument is required and must be a non-empty string', exitCode: -1, truncated: false }
-  }
-  return executeBash({ command, timeout: typeof timeout === 'number' ? timeout : undefined })
+  const validCommand = typeof command === 'string' && command.trim() !== ''
+  const result: BashResult = validCommand
+    ? await executeBash({ command: command as string, timeout: typeof timeout === 'number' ? timeout : undefined })
+    : { output: 'error: the "command" argument is required and must be a non-empty string', exitCode: -1, truncated: false }
+  onEvent({
+    type: 'tool',
+    name: BASH_TOOL_NAME,
+    input: { command: typeof command === 'string' ? command : String(command ?? ''), ...(typeof timeout === 'number' ? { timeout } : {}) },
+    output: result.output,
+    exitCode: result.exitCode,
+    timestamp: Date.now(),
+  })
+  return result
 }
 
 // Anthropic 流式响应里一个正在累积的 content block（按 index 归位，用于回放 assistant 消息）
@@ -121,7 +131,7 @@ async function chatWithAnthropic(req: ChatRequest): Promise<ChatResult> {
       conversation.push({ role: 'assistant', content: res.content })
       const toolResults: Anthropic.ToolResultBlockParam[] = []
       for (const toolUse of toolUses) {
-        const result = await runBashTool(toolUse.input)
+        const result = await runBashTool(toolUse.input, req.onEvent)
         toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: formatBashResult(result) })
       }
       conversation.push({ role: 'user', content: toolResults })
@@ -180,7 +190,7 @@ async function chatWithAnthropic(req: ChatRequest): Promise<ChatResult> {
         conversation.push({ role: 'assistant', content: toAnthropicAssistantContent(ordered) })
         const toolResults: Anthropic.ToolResultBlockParam[] = []
         for (const toolUse of toolUses) {
-          const result = await runBashTool(parseToolArgs(toolUse.json))
+          const result = await runBashTool(parseToolArgs(toolUse.json), req.onEvent)
           toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: formatBashResult(result) })
         }
         conversation.push({ role: 'user', content: toolResults })
@@ -219,7 +229,7 @@ async function chatWithOpenAiChat(req: ChatRequest): Promise<ChatResult> {
         })),
       })
       for (const call of toolCalls) {
-        const result = await runBashTool(parseToolArgs(call.function.arguments))
+        const result = await runBashTool(parseToolArgs(call.function.arguments), req.onEvent)
         messages.push({ role: 'tool', tool_call_id: call.id, content: formatBashResult(result) })
       }
     }
@@ -270,7 +280,7 @@ async function chatWithOpenAiChat(req: ChatRequest): Promise<ChatResult> {
           })),
         })
         for (const call of ordered) {
-          const result = await runBashTool(parseToolArgs(call.args))
+          const result = await runBashTool(parseToolArgs(call.args), req.onEvent)
           messages.push({ role: 'tool', tool_call_id: call.id, content: formatBashResult(result) })
         }
       }
@@ -301,7 +311,7 @@ async function chatWithOpenAiResponses(req: ChatRequest): Promise<ChatResult> {
         input.push({ type: 'function_call', call_id: call.call_id, name: call.name, arguments: call.arguments })
       }
       for (const call of calls) {
-        const result = await runBashTool(parseToolArgs(call.arguments))
+        const result = await runBashTool(parseToolArgs(call.arguments), req.onEvent)
         input.push({ type: 'function_call_output', call_id: call.call_id, output: formatBashResult(result) })
       }
     }
@@ -331,7 +341,7 @@ async function chatWithOpenAiResponses(req: ChatRequest): Promise<ChatResult> {
           input.push({ type: 'function_call', call_id: call.call_id, name: call.name, arguments: call.arguments })
         }
         for (const call of calls) {
-          const result = await runBashTool(parseToolArgs(call.arguments))
+          const result = await runBashTool(parseToolArgs(call.arguments), req.onEvent)
           input.push({ type: 'function_call_output', call_id: call.call_id, output: formatBashResult(result) })
         }
       }

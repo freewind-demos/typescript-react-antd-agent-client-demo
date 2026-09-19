@@ -33,6 +33,8 @@ export function formatLogEvent(event: LogEvent): string {
       return `=== [ERROR] @ ${time} ===\n${event.message}`
     case 'end':
       return `=== [END] @ ${time} ===`
+    case 'tool':
+      return `=== [TOOL] ${event.name} @ ${time} ===\nInput: ${JSON.stringify(event.input)}\nExit code: ${event.exitCode}\nOutput:\n${event.output}`
   }
 }
 
@@ -173,6 +175,8 @@ function aggregateResponse(protocol: Protocol, events: unknown[]): unknown {
 export type InteractionRecord = {
   request: { method: string; url: string; headers: Record<string, string>; body: unknown } | null
   response: { status: number; statusText: string; headers: Record<string, string>; body: unknown } | null
+  // 这一轮请求过程中触发的工具调用（本地 Bash 执行结果）
+  tools?: Array<{ name: string; input: { command: string; timeout?: number }; output: string; exitCode: number }>
 }
 
 // 会话状态：交互列表（一个请求配一个回复）+ 当前响应的已收事件
@@ -234,6 +238,13 @@ export class LogManager {
       const last = state.interactions[state.interactions.length - 1]
       if (last) {
         last.response = { status: event.status, statusText: event.statusText, headers: event.headers, body: last.response?.body ?? null }
+      }
+      this.writeJsonFile(sessionId, state)
+    } else if (event.type === 'tool') {
+      // 工具调用：挂到最近一次交互记录上（这一轮请求触发的本地 Bash 执行）
+      const last = state.interactions[state.interactions.length - 1]
+      if (last) {
+        last.tools = [...(last.tools ?? []), { name: event.name, input: event.input, output: event.output, exitCode: event.exitCode }]
       }
       this.writeJsonFile(sessionId, state)
     } else if (event.type === 'chunk') {
