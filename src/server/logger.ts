@@ -1,6 +1,7 @@
 // 日志写入器：把中间件产生的日志事件落盘到文件，并实时广播给前端
 // 每个会话（sessionId）两份文件：
-//   logs/<sessionId>.log  —— raw 原样日志（每条事件完整原始内容）
+//   logs/<sessionId>.log  —— 协议真实收发的原样日志（request / response / chunk / error；
+//                            [TOOL] / [END] 等本地信息不写入）
 //   logs/<sessionId>.json —— 整个会话的结构化 JSON（request 的 headers/body、response 的 status/headers、提取的回复文本）
 // 前端日志面板四个 Tab：请求/响应、会话、delta（与 raw 同源，但合并结构一致的连续分片）、raw（原样底层日志）。
 
@@ -36,6 +37,14 @@ export function formatLogEvent(event: LogEvent): string {
     case 'tool':
       return `=== [TOOL] ${event.name} @ ${time} ===\nInput: ${JSON.stringify(event.input)}\nExit code: ${event.exitCode}\nOutput:\n${event.output}`
   }
+}
+
+// 只有"协议真实收发"的事件才进日志视图：
+// request / response / chunk / error 是协议层的数据；
+// [TOOL]（本地 bash 执行结果，本地合成）与 [END]（本地结束标记）是本地/辅助信息，
+// 不进日志，避免误导 —— 这个 Client 的目的就是看清协议"发了什么、收了什么"。
+function isProtocolEvent(event: LogEvent): boolean {
+  return event.type === 'request' || event.type === 'response' || event.type === 'chunk' || event.type === 'error'
 }
 
 // 从一条原始文本里提取协议原生的 JSON：请求体（整段 JSON）或响应事件（每个 data: 行的 JSON）。
@@ -208,16 +217,18 @@ export class LogManager {
     return sessionId.replace(/[^a-zA-Z0-9_-]/g, '_')
   }
 
-  // 某个会话追加一条日志事件：更新 verbose 文件与协议 JSON，并广播给所有订阅者
+  // 某个会话追加一条日志事件：更新原样日志文件与协议 JSON，并广播给所有订阅者
   append(sessionId: string, event: LogEvent, _protocol?: Protocol): void {
-    // ---- verbose 原样日志 ----
-    let filePath = this.filePaths[sessionId]
-    if (!filePath) {
-      filePath = join(LOGS_DIR, `${this.safeName(sessionId)}.log`)
-      this.filePaths[sessionId] = filePath
+    // ---- 原样日志（仅协议真实收发的事件；[TOOL] / [END] 是本地信息，不写入）----
+    if (isProtocolEvent(event)) {
+      let filePath = this.filePaths[sessionId]
+      if (!filePath) {
+        filePath = join(LOGS_DIR, `${this.safeName(sessionId)}.log`)
+        this.filePaths[sessionId] = filePath
+      }
+      // writeFileSync 追加（a 标志）写入一行块
+      writeFileSync(filePath, `${formatLogEvent(event)}\n\n`, { flag: 'a' })
     }
-    // writeFileSync 追加（a 标志）写入一行块
-    writeFileSync(filePath, `${formatLogEvent(event)}\n\n`, { flag: 'a' })
 
     // ---- 收集本次事件里的协议原生 JSON ----
     // 请求事件：请求体就是协议 JSON；chunk 事件：响应里每个 data: 行是协议事件 JSON
@@ -270,7 +281,9 @@ export class LogManager {
     }
 
     // ---- 广播给前端：SSE 格式 data: JSON\n\n ----
-    const payload = `data: ${JSON.stringify({ ...event, text: formatLogEvent(event), requestJson, currentResponse, chunkJsons, sessionId })}\n\n`
+    // text 只给协议事件（前端据此追加日志视图；[TOOL] 等不带 text，因此不会出现在日志里，
+    // 但事件本身照常广播，供 Chat 面板渲染工具气泡）
+    const payload = `data: ${JSON.stringify({ ...event, text: isProtocolEvent(event) ? formatLogEvent(event) : undefined, requestJson, currentResponse, chunkJsons, sessionId })}\n\n`
     for (const client of this.subscribers) {
       client.send(payload)
     }
