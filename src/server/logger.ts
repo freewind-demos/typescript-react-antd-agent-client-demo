@@ -71,6 +71,17 @@ function extractProtocolJsons(raw: string): unknown[] {
   return result
 }
 
+// 取出分片里所有 data: 行的原始 payload（保持顺序，保留 [DONE] 等非 JSON 行），
+// 供前端 delta 视图逐条原样展示 —— 展示的是"真实收到的每一行"，不做过滤。
+function extractSsePayloads(raw: string): string[] {
+  const out: string[] = []
+  for (const line of raw.split('\n')) {
+    if (!line.startsWith('data: ')) continue
+    out.push(line.slice(6).trim())
+  }
+  return out
+}
+
 // 把一次响应的所有事件聚合成"完整响应对象"（会话 JSON 里展示用）：
 // 流式响应把文本增量拼完整、补齐结束原因等；非流式响应直接就是完整对象。
 function aggregateResponse(protocol: Protocol, events: unknown[]): unknown {
@@ -234,8 +245,8 @@ export class LogManager {
     // 请求事件：请求体就是协议 JSON；chunk 事件：响应里每个 data: 行是协议事件 JSON
     let requestJson: unknown
     let currentResponse: unknown
-    // chunk 事件解析出的协议原生 JSON（供前端 delta Tab 合并展示）
-    let chunkJsons: unknown[] | undefined
+    // chunk 事件里每个 data: 行的原始 payload（含 [DONE]，供前端 delta Tab 原样展示与合并）
+    let chunkPayloads: string[] | undefined
     const state = this.sessionStates[sessionId] ?? (this.sessionStates[sessionId] = { interactions: [], events: [], protocol: undefined })
 
     if (event.type === 'request') {
@@ -263,7 +274,7 @@ export class LogManager {
     } else if (event.type === 'chunk') {
       // 累积响应事件，聚合出完整响应正文
       const evs = extractProtocolJsons(event.text)
-      chunkJsons = evs
+      chunkPayloads = extractSsePayloads(event.text)
       if (evs.length > 0) {
         state.events.push(...evs)
         // 兜底协议取列表第一个（正常情况下 protocol 一定由请求带入，这里几乎不会用到）
@@ -284,7 +295,7 @@ export class LogManager {
     // ---- 广播给前端：SSE 格式 data: JSON\n\n ----
     // text 只给协议事件（前端据此追加日志视图；[TOOL] 等不带 text，因此不会出现在日志里，
     // 但事件本身照常广播，供 Chat 面板渲染工具气泡）
-    const payload = `data: ${JSON.stringify({ ...event, text: isProtocolEvent(event) ? formatLogEvent(event) : undefined, requestJson, currentResponse, chunkJsons, sessionId })}\n\n`
+    const payload = `data: ${JSON.stringify({ ...event, text: isProtocolEvent(event) ? formatLogEvent(event) : undefined, requestJson, currentResponse, chunkPayloads, sessionId })}\n\n`
     for (const client of this.subscribers) {
       client.send(payload)
     }
