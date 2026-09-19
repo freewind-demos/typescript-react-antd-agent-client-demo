@@ -412,6 +412,32 @@ export default function App() {
   // 模型下拉选项：历史用过的模型 + 当前 Fetch 到的模型（去重，历史在前）
   const modelOptions = [...new Set([...modelHistory, ...models])].map((m) => ({ value: m }))
 
+  // 复制当前选中 Tab 正在显示的内容（与"清空"按钮一样常驻显示）
+  const copyCurrentTab = async () => {
+    let text = ''
+    if (activeLogTab === 'current') {
+      // Tab1：上下两段一起复制，各自加一行注释标明来源
+      const sections: string[] = []
+      if (requestJsonc) sections.push(`// ===== Request =====\n${requestJsonc}`)
+      if (responseJsonc) sections.push(`// ===== Response =====\n${responseJsonc}`)
+      text = sections.join('\n\n')
+    } else if (activeLogTab === 'session') {
+      text = sessionJsonText
+    } else {
+      text = logText
+    }
+    if (!text) {
+      message.warning('暂无内容可复制')
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(text)
+      message.success('已复制')
+    } catch (err) {
+      message.error(`复制失败：${String(err)}`)
+    }
+  }
+
   return (
     <Flex style={{ height: '100vh', background: '#f5f5f5', boxSizing: 'border-box', padding: 12, overflow: 'hidden' }}>
       {/* 左右分栏：可拖动调整宽度（左侧默认 40%） */}
@@ -580,9 +606,14 @@ export default function App() {
               onChange={setActiveLogTab}
               tabBarExtraContent={{
                 right: (
-                  <Button size="small" onClick={clearCurrentTab}>
-                    清空
-                  </Button>
+                  <Space size="small">
+                    <Button size="small" onClick={copyCurrentTab}>
+                      Copy
+                    </Button>
+                    <Button size="small" onClick={clearCurrentTab}>
+                      清空
+                    </Button>
+                  </Space>
                 ),
               }}
               items={[
