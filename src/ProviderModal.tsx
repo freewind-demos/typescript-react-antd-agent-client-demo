@@ -23,7 +23,8 @@ export default function ProviderModal({
   onCancel: () => void
   onSubmit: (draft: ProviderDraft) => void
 }) {
-  const [protocol, setProtocol] = useState<Protocol>('anthropic-messages')
+  // 默认选中协议列表的第一个（协议顺序：OpenAI 两个在前，Anthropic 在最后，见 protocols.ts）
+  const [protocol, setProtocol] = useState<Protocol>(PROTOCOLS[0]!.value)
   const [baseUrl, setBaseUrl] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [model, setModel] = useState('')
@@ -33,7 +34,7 @@ export default function ProviderModal({
   // 每次打开时按 initial 重置表单（添加模式为空的表单）
   useEffect(() => {
     if (!open) return
-    setProtocol(initial?.protocol ?? 'anthropic-messages')
+    setProtocol(initial?.protocol ?? PROTOCOLS[0]!.value)
     setBaseUrl(initial?.baseUrl ?? '')
     setApiKey(initial?.apiKey ?? '')
     setModel(initial?.model ?? '')
