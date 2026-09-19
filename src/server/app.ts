@@ -28,6 +28,8 @@ function handleChat(protocol: Protocol) {
       res.status(400).json({ error: 'missing required fields: baseUrl/apiKey/model/messages/sessionId' })
       return
     }
+    // 是否已进入流式响应：一旦进入就按 SSE 收尾（不能再用 res.status(...).json(...)）
+    let streaming = false
     try {
       // 日志回调：写文件 + 广播给订阅的 SSE 客户端（带协议用于生成整合摘要）
       const onEvent = (event: LogEvent) => logManager.append(sessionId, event, protocol)
@@ -40,6 +42,7 @@ function handleChat(protocol: Protocol) {
       }
 
       // 流式：以 SSE 形式把文本增量转发给前端，每个增量一条 data
+      streaming = true
       res.setHeader('content-type', 'text/event-stream')
       res.setHeader('cache-control', 'no-cache')
       res.setHeader('connection', 'keep-alive')
@@ -50,9 +53,11 @@ function handleChat(protocol: Protocol) {
       res.end()
     } catch (error) {
       // 上游 API 报错（错误本身也会被中间件记录到日志）
-      if (res.headersSent) {
-        // 流式响应已开始（headers 已发出）：不能再返回 500，只能结束连接。
-        // 此时错误已被日志中间件记录为 error 事件（"中间打断"日志），前端拿到的是截断的流。
+      if (streaming) {
+        // 流式响应已开始（headers 已发出）：不能再返回 500，改为往流里补一条 error 事件 +
+        // 结束标记，让前端能提示用户（否则前端只会看到流被静默截断，不知道发生了什么）
+        res.write(`data: ${JSON.stringify({ error: String(error) })}\n\n`)
+        res.write('data: [DONE]\n\n')
         res.end()
         return
       }

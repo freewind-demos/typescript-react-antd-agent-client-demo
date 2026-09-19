@@ -372,6 +372,8 @@ export default function App() {
       const reader = res.body!.getReader()
       const decoder = new TextDecoder()
       let buffer = ''
+      // Server 在流中途失败时会补发一条 { error } 事件，这里收集起来、流读完后抛出提示
+      let streamError: string | null = null
       for (;;) {
         const { done, value } = await reader.read()
         if (done) break
@@ -388,6 +390,8 @@ export default function App() {
               const parsed = JSON.parse(data)
               if (typeof parsed.delta === 'string') {
                 appendAssistant(parsed.delta)
+              } else if (typeof parsed.error === 'string') {
+                streamError = parsed.error
               }
             } catch {
               // 无法解析的单行直接忽略
@@ -395,12 +399,20 @@ export default function App() {
           }
         }
       }
+      // 流中途失败：抛出，由外层 catch 弹出错误提示（不记入配置历史）
+      if (streamError) {
+        throw new Error(streamError)
+      }
       // 流式正常读完（收到连接结束）：记录本次使用的配置（含模型）到历史
       recordConfigUsed(baseUrl, apiKey, model)
     } catch (err) {
       message.error(String(err))
-      // 失败时移除那个空的助手气泡（配置不记入历史）
-      setMessages((prev) => prev.slice(0, -1))
+      // 只移除还没内容的助手气泡（请求阶段就失败的情况）；
+      // 流式已输出过内容时保留，避免把用户已经看到的内容抹掉
+      setMessages((prev) => {
+        const last = prev[prev.length - 1]
+        return last && last.role === 'assistant' && last.content === '' ? prev.slice(0, -1) : prev
+      })
     } finally {
       setSending(false)
     }
