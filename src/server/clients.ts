@@ -4,7 +4,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
 import { createLoggingFetch, type LogEvent } from './middleware.js'
-import { BASH_TOOL_ANTHROPIC, executeBash, formatBashResult, type BashResult } from './tools.js'
+import { BASH_TOOL_ANTHROPIC, BASH_TOOL_CHAT, executeBash, formatBashResult, type BashResult } from './tools.js'
 
 // 支持的三种协议标识
 export type Protocol = 'anthropic-messages' | 'openai-chat-completions' | 'openai-responses'
@@ -190,27 +190,91 @@ async function chatWithAnthropic(req: ChatRequest): Promise<ChatResult> {
   }
 }
 
-// OpenAI Chat Completions 协议聊天
+// OpenAI Chat Completions 协议聊天（带 Bash 工具循环）
 async function chatWithOpenAiChat(req: ChatRequest): Promise<ChatResult> {
   const client = createClient('openai-chat-completions', req.baseUrl, req.apiKey, req.onEvent) as OpenAI
-  const messages = req.messages.map((m) => ({ role: m.role, content: m.content }))
+  // 只暴露 Bash 这一个工具
+  const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [BASH_TOOL_CHAT]
+  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = req.messages.map((m) => ({ role: m.role, content: m.content }))
 
+  // 非流式：内部跑完整 agent loop，只在最后一轮（无工具调用）返回文本
   if (!req.stream) {
-    const res = await client.chat.completions.create({ model: req.model, messages })
-    return { stream: false, text: res.choices[0]?.message?.content ?? '' }
+    for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
+      const res = await client.chat.completions.create({ model: req.model, messages, tools })
+      const message = res.choices[0]?.message
+      // 只处理标准 function 调用（本 demo 不使用 custom tool）
+      const toolCalls = (message?.tool_calls ?? []).filter((call) => call.type === 'function')
+      // 本轮没有工具调用：即为最终回答
+      if (toolCalls.length === 0) {
+        return { stream: false, text: message?.content ?? '' }
+      }
+      // 回放 assistant 消息（含 tool_calls），再把每个工具结果以 role:'tool' 消息回传
+      messages.push({
+        role: 'assistant',
+        content: message?.content ?? null,
+        tool_calls: toolCalls.map((call) => ({
+          id: call.id,
+          type: 'function' as const,
+          function: { name: call.function.name, arguments: call.function.arguments },
+        })),
+      })
+      for (const call of toolCalls) {
+        const result = await runBashTool(parseToolArgs(call.function.arguments))
+        messages.push({ role: 'tool', tool_call_id: call.id, content: formatBashResult(result) })
+      }
+    }
+    throw new Error(`agent loop exceeded ${MAX_AGENT_TURNS} turns`)
   }
 
-  const stream = await client.chat.completions.create({ model: req.model, messages, stream: true })
+  // 流式：逐轮请求，边收边 yield 文本；本轮出现工具调用则执行后进入下一轮
   return {
     stream: true,
     iterator: (async function* () {
-      for await (const chunk of stream) {
-        // 每个 chunk 的 choices[0].delta.content 是文本增量，可能为 null
-        const delta = chunk.choices[0]?.delta?.content
-        if (delta) {
-          yield delta
+      for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
+        const stream = await client.chat.completions.create({ model: req.model, messages, tools, stream: true })
+        // 累积本轮：content 文本 + tool_calls（分数片，按 index 归位）
+        let content = ''
+        const toolCalls = new Map<number, { id: string; name: string; args: string }>()
+        for await (const chunk of stream) {
+          const delta = chunk.choices[0]?.delta
+          if (!delta) continue
+          // 文本增量：累积用于回放，同时立即 yield 给前端（打字机效果）
+          if (delta.content) {
+            content += delta.content
+            yield delta.content
+          }
+          // 工具调用分数片返回：id/name 只在首个分片给，arguments 需要逐片拼接
+          for (const piece of delta.tool_calls ?? []) {
+            const index = piece.index ?? 0
+            let acc = toolCalls.get(index)
+            if (!acc) {
+              acc = { id: '', name: '', args: '' }
+              toolCalls.set(index, acc)
+            }
+            if (piece.id) acc.id = piece.id
+            if (piece.function?.name) acc.name = piece.function.name
+            if (piece.function?.arguments) acc.args += piece.function.arguments
+          }
+        }
+        // 本轮无工具调用：整个 agent loop 结束
+        if (toolCalls.size === 0) return
+        const ordered = [...toolCalls.entries()].sort((a, b) => a[0] - b[0]).map(([, value]) => value)
+        // 回放 assistant 消息（含 tool_calls），再执行工具并把结果作为 role:'tool' 消息
+        messages.push({
+          role: 'assistant',
+          content: content || null,
+          tool_calls: ordered.map((call) => ({
+            id: call.id,
+            type: 'function' as const,
+            function: { name: call.name, arguments: call.args },
+          })),
+        })
+        for (const call of ordered) {
+          const result = await runBashTool(parseToolArgs(call.args))
+          messages.push({ role: 'tool', tool_call_id: call.id, content: formatBashResult(result) })
         }
       }
+      throw new Error(`agent loop exceeded ${MAX_AGENT_TURNS} turns`)
     })(),
   }
 }
