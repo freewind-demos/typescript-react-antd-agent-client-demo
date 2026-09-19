@@ -4,6 +4,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
 import { createLoggingFetch, type LogEvent } from './middleware.js'
+import { BASH_TOOL_ANTHROPIC, executeBash, formatBashResult, type BashResult } from './tools.js'
 
 // 支持的三种协议标识
 export type Protocol = 'anthropic-messages' | 'openai-chat-completions' | 'openai-responses'
@@ -47,44 +48,144 @@ function extractAnthropicText(content: Anthropic.Message['content']): string {
   return text
 }
 
-// Anthropic Messages 协议聊天
+// ---- Agent loop 公共部分 ----
+
+// agent loop 最大轮数：模型 → 工具 → 模型 … 的循环上限，防止无限调用
+const MAX_AGENT_TURNS = 20
+
+// 解析模型给出的工具入参（JSON 文本 → 对象），解析失败按空对象处理
+function parseToolArgs(json: string): unknown {
+  if (!json.trim()) return {}
+  try {
+    return JSON.parse(json)
+  } catch {
+    return {}
+  }
+}
+
+// 按 Bash 工具约定执行命令：command 缺失/非法时直接返回错误结果，不真正执行
+async function runBashTool(input: unknown): Promise<BashResult> {
+  const { command, timeout } = (input ?? {}) as { command?: unknown; timeout?: unknown }
+  if (typeof command !== 'string' || command.trim() === '') {
+    return { output: 'error: the "command" argument is required and must be a non-empty string', exitCode: -1, truncated: false }
+  }
+  return executeBash({ command, timeout: typeof timeout === 'number' ? timeout : undefined })
+}
+
+// Anthropic 流式响应里一个正在累积的 content block（按 index 归位，用于回放 assistant 消息）
+type AnthropicPartialBlock =
+  | { type: 'text'; index: number; text: string }
+  | { type: 'thinking'; index: number; thinking: string; signature: string }
+  | { type: 'tool_use'; index: number; id: string; name: string; json: string }
+
+// 把累积的 block 转成可回放的 assistant content（按 index 排序，工具入参解析成对象）
+function toAnthropicAssistantContent(blocks: AnthropicPartialBlock[]): Anthropic.ContentBlockParam[] {
+  return blocks
+    .slice()
+    .sort((a, b) => a.index - b.index)
+    .map((block) => {
+      if (block.type === 'text') return { type: 'text', text: block.text }
+      // 思考块带 signature 原样回放，否则部分上游会拒绝下一轮请求
+      if (block.type === 'thinking') return { type: 'thinking', thinking: block.thinking, signature: block.signature }
+      return { type: 'tool_use', id: block.id, name: block.name, input: parseToolArgs(block.json) }
+    })
+}
+
+// Anthropic Messages 协议聊天（带 Bash 工具循环）
 async function chatWithAnthropic(req: ChatRequest): Promise<ChatResult> {
   const client = createClient('anthropic-messages', req.baseUrl, req.apiKey, req.onEvent) as Anthropic
+  // 只暴露 Bash 这一个工具
+  const tools: Anthropic.Tool[] = [BASH_TOOL_ANTHROPIC]
   // Anthropic 的 system prompt 是独立字段，不在 messages 数组里，需要拆出来
   const system = req.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n')
-  const conversation = req.messages.filter((m) => m.role !== 'system').map((m) => ({
-    role: m.role as 'user' | 'assistant',
-    content: m.content,
-  }))
+  const conversation: Anthropic.MessageParam[] = req.messages
+    .filter((m) => m.role !== 'system')
+    .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
 
+  // 非流式：内部跑完整 agent loop，只在最后一轮（无工具调用）返回文本
   if (!req.stream) {
-    // 非流式：一次拿完整响应
-    const res = await client.messages.create({
-      model: req.model,
-      max_tokens: 4096,
-      system: system || undefined,
-      messages: conversation,
-    })
-    return { stream: false, text: extractAnthropicText(res.content) }
+    for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
+      const res = await client.messages.create({
+        model: req.model,
+        max_tokens: 4096,
+        system: system || undefined,
+        messages: conversation,
+        tools,
+      })
+      const toolUses = res.content.filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use')
+      // 本轮没有工具调用：即为最终回答
+      if (toolUses.length === 0) {
+        return { stream: false, text: extractAnthropicText(res.content) }
+      }
+      // 回放 assistant 消息（含 tool_use），再把每个工具结果作为 user 消息回传
+      conversation.push({ role: 'assistant', content: res.content })
+      const toolResults: Anthropic.ToolResultBlockParam[] = []
+      for (const toolUse of toolUses) {
+        const result = await runBashTool(toolUse.input)
+        toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: formatBashResult(result) })
+      }
+      conversation.push({ role: 'user', content: toolResults })
+    }
+    throw new Error(`agent loop exceeded ${MAX_AGENT_TURNS} turns`)
   }
 
-  // 流式：SDK 返回事件流（APIPromise 包装，需要先 await），逐事件提取文本增量
-  const stream = await client.messages.create({
-    model: req.model,
-    max_tokens: 4096,
-    system: system || undefined,
-    messages: conversation,
-    stream: true,
-  })
+  // 流式：逐轮请求，边收边 yield 文本；本轮出现工具调用则执行后进入下一轮
   return {
     stream: true,
     iterator: (async function* () {
-      for await (const event of stream) {
-        // content_block_delta 且 delta 是 text_delta 类型时才有文本增量（0.117 版 SDK 的事件类型）
-        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-          yield event.delta.text
+      for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
+        const stream = await client.messages.create({
+          model: req.model,
+          max_tokens: 4096,
+          system: system || undefined,
+          messages: conversation,
+          tools,
+          stream: true,
+        })
+        // 累积本轮所有 content block（文本 / 工具调用）
+        const blocks = new Map<number, AnthropicPartialBlock>()
+        for await (const event of stream) {
+          if (event.type === 'content_block_start') {
+            const cb = event.content_block
+            if (cb.type === 'text') {
+              blocks.set(event.index, { type: 'text', index: event.index, text: cb.text })
+            } else if (cb.type === 'thinking') {
+              // 思考块也要累积（含 signature），用于回放下一轮请求
+              blocks.set(event.index, { type: 'thinking', index: event.index, thinking: cb.thinking, signature: cb.signature })
+            } else if (cb.type === 'tool_use') {
+              blocks.set(event.index, { type: 'tool_use', index: event.index, id: cb.id, name: cb.name, json: '' })
+            }
+          } else if (event.type === 'content_block_delta') {
+            const block = blocks.get(event.index)
+            if (event.delta.type === 'text_delta') {
+              // 文本增量：累积用于回放，同时立即 yield 给前端（打字机效果）
+              if (block && block.type === 'text') block.text += event.delta.text
+              else blocks.set(event.index, { type: 'text', index: event.index, text: event.delta.text })
+              yield event.delta.text
+            } else if (event.delta.type === 'thinking_delta') {
+              if (block && block.type === 'thinking') block.thinking += event.delta.thinking
+            } else if (event.delta.type === 'signature_delta') {
+              if (block && block.type === 'thinking') block.signature += event.delta.signature
+            } else if (event.delta.type === 'input_json_delta') {
+              // 工具入参是分片 JSON，逐段累积
+              if (block && block.type === 'tool_use') block.json += event.delta.partial_json
+            }
+          }
         }
+        const ordered = [...blocks.values()].sort((a, b) => a.index - b.index)
+        const toolUses = ordered.filter((b): b is Extract<AnthropicPartialBlock, { type: 'tool_use' }> => b.type === 'tool_use')
+        // 本轮无工具调用：整个 agent loop 结束
+        if (toolUses.length === 0) return
+        // 回放 assistant 消息并执行工具，结果作为下一轮的 user 消息
+        conversation.push({ role: 'assistant', content: toAnthropicAssistantContent(ordered) })
+        const toolResults: Anthropic.ToolResultBlockParam[] = []
+        for (const toolUse of toolUses) {
+          const result = await runBashTool(parseToolArgs(toolUse.json))
+          toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: formatBashResult(result) })
+        }
+        conversation.push({ role: 'user', content: toolResults })
       }
+      throw new Error(`agent loop exceeded ${MAX_AGENT_TURNS} turns`)
     })(),
   }
 }
