@@ -24,6 +24,75 @@ type InteractionRecord = {
   tools?: ToolCallInfo[]
 }
 
+// ---- delta Tab：把"结构完全一致"的连续分片合并成一条 ----
+// 内容类字段（跨三种协议的流式增量字段）：值不同就拼接续写
+const ACCUMULATING_KEYS = new Set(['content', 'reasoning_content', 'arguments', 'text', 'thinking', 'signature', 'partial_json', 'delta', 'output_text', 'refusal'])
+// 比较时忽略的"会变的元数据"（合并时取第一条的值）
+const IGNORED_KEYS = new Set(['created', 'sequence_number', 'timestamp'])
+
+// delta Tab 的一条：chunk = 流式分片（已合并）；raw = 其余事件（REQUEST/RESPONSE/TOOL/END/ERROR）原样块
+type DeltaEntry = { kind: 'chunk'; ts: number; json: unknown } | { kind: 'raw'; text: string }
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+
+// 两条分片能否合并：忽略 created 等元数据后，结构（键集合）完全一致，且非内容类字段值相等
+function canMergeChunks(a: unknown, b: unknown, key?: string): boolean {
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((item, i) => canMergeChunks(item, b[i]))
+  }
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const keysA = Object.keys(a).filter((k) => !IGNORED_KEYS.has(k))
+    const keysB = Object.keys(b).filter((k) => !IGNORED_KEYS.has(k))
+    if (keysA.length !== keysB.length) return false
+    return keysA.every((k) => k in b && canMergeChunks(a[k], b[k], k))
+  }
+  if (typeof a === 'string' && typeof b === 'string') {
+    // 内容类字段允许不同（会被拼接）；其余字符串（枚举/标识）必须相等
+    return key !== undefined && ACCUMULATING_KEYS.has(key) ? true : a === b
+  }
+  return a === b
+}
+
+// 合并两条分片（仅在 canMergeChunks 为真时调用）：内容类字符串拼接，其余取第一条
+function mergeChunks(a: unknown, b: unknown, key?: string): unknown {
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.map((item, i) => mergeChunks(item, b[i]))
+  }
+  if (isPlainObject(a) && isPlainObject(b)) {
+    const out: Record<string, unknown> = {}
+    for (const k of Array.from(new Set([...Object.keys(a), ...Object.keys(b)]))) {
+      if (IGNORED_KEYS.has(k)) {
+        if (k in a) out[k] = a[k] // 取第一条的值
+        continue
+      }
+      out[k] = mergeChunks(a[k], b[k], k)
+    }
+    return out
+  }
+  if (typeof a === 'string' && typeof b === 'string') {
+    return key !== undefined && ACCUMULATING_KEYS.has(key) ? a + b : a
+  }
+  return a
+}
+
+// 把一条新分片并入 delta 条目：与末尾 chunk 条目可合并则合并，否则新增一条
+function appendChunkEntry(entries: DeltaEntry[], ts: number, json: unknown): DeltaEntry[] {
+  const last = entries[entries.length - 1]
+  if (last && last.kind === 'chunk' && canMergeChunks(last.json, json)) {
+    const next = entries.slice()
+    next[next.length - 1] = { kind: 'chunk', ts: last.ts, json: mergeChunks(last.json, json) }
+    return next
+  }
+  return [...entries, { kind: 'chunk', ts, json }]
+}
+
+// delta Tab 的展示文本：chunk 用第一条的时间戳 + data JSON，其余事件原样
+function renderDeltaText(entries: DeltaEntry[]): string {
+  return entries
+    .map((e) => (e.kind === 'raw' ? e.text : `=== [CHUNK] @ ${new Date(e.ts).toISOString()} ===\ndata: ${JSON.stringify(e.json)}`))
+    .join('\n\n')
+}
+
 // headers 转成若干行注释文本
 function headerCommentLines(headers: Record<string, string>): string[] {
   const entries = Object.entries(headers)
@@ -119,11 +188,14 @@ export default function App() {
   const [sessionId, setSessionId] = useState(() => crypto.randomUUID())
   // 当前会话的 verbose 原样日志文本（初始从文件全量拉取，之后实时追加）
   const [logText, setLogText] = useState('')
+  // Tab3「delta」的条目：chunk 分片按规则合并，其余事件为原样块
+  const [deltaEntries, setDeltaEntries] = useState<DeltaEntry[]>([])
   // Tab2「会话」的显示数据：完整交互记录数组（一项 = 一个请求 + 一个回复）
   const [sessionJson, setSessionJson] = useState<InteractionRecord[]>([])
   // Tab1「请求/响应」的显示数据：只保留最新一次交互（与 sessionJson 独立持有，清空互不影响）
   const [currentPair, setCurrentPair] = useState<InteractionRecord | null>(null)
   const logBoxRef = useRef<HTMLDivElement>(null)
+  const deltaBoxRef = useRef<HTMLDivElement>(null)
   const jsonBoxRef = useRef<HTMLDivElement>(null)
 
   // 日志面板当前选中的 Tab（右侧清空按钮据此清对应的数据）
@@ -159,20 +231,23 @@ export default function App() {
     setSessionId(crypto.randomUUID())
     setMessages([])
     setLogText('')
+    setDeltaEntries([])
     setSessionJson([])
     setCurrentPair(null)
   }
 
-  // 三个 Tab 各自的清空：只清自己的显示数据，互不影响
+  // 四个 Tab 各自的清空：只清自己的显示数据，互不影响
   const clearTab1 = () => setCurrentPair(null) // Tab1「请求/响应」
   const clearTab2 = () => setSessionJson([]) // Tab2「会话」
-  const clearTab3 = () => setLogText('') // Tab3「raw」
+  const clearTabDelta = () => setDeltaEntries([]) // Tab3「delta」
+  const clearTabRaw = () => setLogText('') // Tab4「raw」
 
   // 清空当前选中的 Tab（按钮在 Tab 标题行最右侧）
   const clearCurrentTab = () => {
     if (activeLogTab === 'current') clearTab1()
     else if (activeLogTab === 'session') clearTab2()
-    else clearTab3()
+    else if (activeLogTab === 'delta') clearTabDelta()
+    else clearTabRaw()
   }
 
   // sessionId 变化时（首次进入 / 新会话）：从 Server 全量拉取该会话的 verbose 日志与交互记录
@@ -201,6 +276,15 @@ export default function App() {
         if (data.sessionId !== sessionId) return
         if (typeof data.text === 'string') {
           setLogText((prev) => prev + data.text + '\n\n')
+        }
+        // delta Tab：chunk 分片展开成一条条 data JSON 并按规则合并；其余事件原样成块
+        if (data.type === 'chunk' && Array.isArray(data.chunkJsons)) {
+          const jsons = data.chunkJsons as unknown[]
+          if (jsons.length > 0) {
+            setDeltaEntries((prev) => jsons.reduce<DeltaEntry[]>((acc, json) => appendChunkEntry(acc, data.timestamp, json), prev))
+          }
+        } else if (typeof data.text === 'string') {
+          setDeltaEntries((prev) => [...prev, { kind: 'raw', text: data.text }])
         }
         // 新请求：追加一条交互记录到 Tab2（带元信息与请求体），响应暂空；Tab1 同步为最新一条
         if (data.requestJson !== undefined) {
@@ -293,6 +377,11 @@ export default function App() {
     const el = logBoxRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [logText])
+
+  useEffect(() => {
+    const el = deltaBoxRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [deltaEntries])
 
   useEffect(() => {
     const el = jsonBoxRef.current
@@ -451,6 +540,8 @@ export default function App() {
     : ''
   // Tab2 显示整个会话：JSONC 数组，一项 = 一个请求 + 一个回复（各自的元信息以注释写在正文前）
   const sessionJsonText = sessionJson.length > 0 ? renderSessionJsonc(sessionJson) : ''
+  // Tab3 显示 delta 视图（与 raw 同内容，但结构一致的连续分片已合并）
+  const deltaText = renderDeltaText(deltaEntries)
   // 模型下拉选项：历史用过的模型 + 当前 Fetch 到的模型（去重，历史在前）
   const modelOptions = [...new Set([...modelHistory, ...models])].map((m) => ({ value: m }))
 
@@ -465,6 +556,8 @@ export default function App() {
       text = sections.join('\n\n')
     } else if (activeLogTab === 'session') {
       text = sessionJsonText
+    } else if (activeLogTab === 'delta') {
+      text = deltaText
     } else {
       text = logText
     }
@@ -719,7 +812,24 @@ export default function App() {
                     </Flex>
                   ),
                 },
-                // Tab3：raw —— 最底层原样日志（完整 headers / body / 每个 SSE 分片）
+                // Tab3：delta —— 与 raw 同内容，但把"结构完全一致"的连续分片合并成一条
+                //（便于一眼看清真正有变化的事件；REQUEST/RESPONSE/TOOL 等其余块原样）
+                {
+                  key: 'delta',
+                  label: 'delta',
+                  children: (
+                    <Flex vertical gap={8} style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
+                      <Flex
+                        ref={deltaBoxRef}
+                        vertical
+                        style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
+                      >
+                        {deltaText || '（暂无日志。与 raw 相同的内容，但把结构完全一致的连续分片合并成一条，方便看事件结构的变化）'}
+                      </Flex>
+                    </Flex>
+                  ),
+                },
+                // Tab4：raw —— 最底层原样日志（完整 headers / body / 每个 SSE 分片）
                 {
                   key: 'raw',
                   label: 'raw',

@@ -1,8 +1,8 @@
 // 日志写入器：把中间件产生的日志事件落盘到文件，并实时广播给前端
 // 每个会话（sessionId）两份文件：
-//   logs/<sessionId>.log  —— verbose 原样日志（每条事件完整原始内容）
+//   logs/<sessionId>.log  —— raw 原样日志（每条事件完整原始内容）
 //   logs/<sessionId>.json —— 整个会话的结构化 JSON（request 的 headers/body、response 的 status/headers、提取的回复文本）
-// 前端日志面板两个 Tab：默认"JSON"（会话结构），"verbose"（原样底层日志）。
+// 前端日志面板四个 Tab：请求/响应、会话、delta（与 raw 同源，但合并结构一致的连续分片）、raw（原样底层日志）。
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -223,6 +223,8 @@ export class LogManager {
     // 请求事件：请求体就是协议 JSON；chunk 事件：响应里每个 data: 行是协议事件 JSON
     let requestJson: unknown
     let currentResponse: unknown
+    // chunk 事件解析出的协议原生 JSON（供前端 delta Tab 合并展示）
+    let chunkJsons: unknown[] | undefined
     const state = this.sessionStates[sessionId] ?? (this.sessionStates[sessionId] = { interactions: [], events: [], protocol: undefined })
 
     if (event.type === 'request') {
@@ -250,6 +252,7 @@ export class LogManager {
     } else if (event.type === 'chunk') {
       // 累积响应事件，聚合出完整响应正文
       const evs = extractProtocolJsons(event.text)
+      chunkJsons = evs
       if (evs.length > 0) {
         state.events.push(...evs)
         currentResponse = aggregateResponse(state.protocol ?? 'anthropic-messages', state.events)
@@ -267,7 +270,7 @@ export class LogManager {
     }
 
     // ---- 广播给前端：SSE 格式 data: JSON\n\n ----
-    const payload = `data: ${JSON.stringify({ ...event, text: formatLogEvent(event), requestJson, currentResponse, sessionId })}\n\n`
+    const payload = `data: ${JSON.stringify({ ...event, text: formatLogEvent(event), requestJson, currentResponse, chunkJsons, sessionId })}\n\n`
     for (const client of this.subscribers) {
       client.send(payload)
     }
