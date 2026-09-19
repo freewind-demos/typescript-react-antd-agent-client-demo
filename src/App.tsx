@@ -611,12 +611,16 @@ export default function App() {
           <Card size="small" style={{ height: '100%', display: 'flex', flexDirection: 'column', marginLeft: 6 }} styles={{ body: { flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden', padding: 0 } }}>
             {/* Tabs 撑满高度：antd Tabs 默认不撑满，用类名控制子元素 */}
             <style>{`
-              .logs-tabs { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 0 12px; }
-              .logs-tabs .ant-tabs-body-holder { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-              .logs-tabs .ant-tabs-body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-              .logs-tabs .ant-tabs-content { min-height: 0; }
-              .logs-tabs .ant-tabs-content-active { flex: 1; min-height: 0; display: flex; flex-direction: column; }
-              .logs-tabs .ant-tabs-content-active > div { flex: 1; min-height: 0; display: flex; }
+              /* min-width: 0 逐级加：防止日志里的超长行（不换行文本）把 Tabs 容器撑宽，
+                 否则右上角 Copy/清空 会被挤出可视区（前两个 Tab 内容含长 JSON 时最明显） */
+              .logs-tabs { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 0 12px; }
+              .logs-tabs .ant-tabs-nav { min-width: 0; }
+              .logs-tabs .ant-tabs-nav-extra { flex: none; }
+              .logs-tabs .ant-tabs-body-holder { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+              .logs-tabs .ant-tabs-body { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+              .logs-tabs .ant-tabs-content { min-width: 0; min-height: 0; }
+              .logs-tabs .ant-tabs-content-active { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+              .logs-tabs .ant-tabs-content-active > div { flex: 1; min-width: 0; min-height: 0; display: flex; }
             `}</style>
             <Tabs
               className="logs-tabs"
@@ -641,22 +645,22 @@ export default function App() {
                   key: 'current',
                   label: '请求/响应',
                   children: (
-                    <Flex vertical gap={8} style={{ flex: 1, minHeight: 0 }}>
+                    <Flex vertical gap={8} style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
                       {/* Request 区：最新一次请求 */}
-                      <Flex vertical style={{ flex: 1, minHeight: 0, background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
+                      <Flex vertical style={{ flex: 1, minWidth: 0, minHeight: 0, background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
                         <Text type="secondary" style={{ fontSize: 11, marginBottom: 4 }}>
                           Request（最新一次）
                         </Text>
-                        <Flex vertical style={{ flex: 1, minHeight: 0, overflowY: 'auto', fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre' }}>
+                        <Flex vertical style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre' }}>
                           {requestJsonc || '（暂无请求）'}
                         </Flex>
                       </Flex>
                       {/* Response 区：最新一次响应（流式已聚合为完整响应） */}
-                      <Flex vertical style={{ flex: 1, minHeight: 0, background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
+                      <Flex vertical style={{ flex: 1, minWidth: 0, minHeight: 0, background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
                         <Text type="secondary" style={{ fontSize: 11, marginBottom: 4 }}>
                           Response（最新一次，流式已聚合为完整响应）
                         </Text>
-                        <Flex vertical style={{ flex: 1, minHeight: 0, overflowY: 'auto', fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre' }}>
+                        <Flex vertical style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre' }}>
                           {responseJsonc || '（暂无响应）'}
                         </Flex>
                       </Flex>
@@ -668,11 +672,11 @@ export default function App() {
                   key: 'session',
                   label: '会话',
                   children: (
-                    <Flex vertical gap={8} style={{ flex: 1, minHeight: 0 }}>
+                    <Flex vertical gap={8} style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
                       <Flex
                         ref={jsonBoxRef}
                         vertical
-                        style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre', wordBreak: 'break-all' }}
+                        style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre', wordBreak: 'break-all' }}
                       >
                         {sessionJsonText || '（暂无会话。这里以数组形式展示整个会话：一项 = 一个请求 + 一个回复，均为协议原生的 JSON）'}
                       </Flex>
@@ -684,11 +688,11 @@ export default function App() {
                   key: 'verbose',
                   label: 'verbose',
                   children: (
-                    <Flex vertical gap={8} style={{ flex: 1, minHeight: 0 }}>
+                    <Flex vertical gap={8} style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
                       <Flex
                         ref={logBoxRef}
                         vertical
-                        style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
+                        style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
                       >
                         {logText || '（暂无日志。发送消息或 Fetch Models 后，这里会原样显示所有发出的请求与收到的响应，流式时每个 SSE 分片单独一条）'}
                       </Flex>
