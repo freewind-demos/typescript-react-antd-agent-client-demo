@@ -14,14 +14,8 @@ export type ProtocolMeta = {
   modelsEndpoint: string
 }
 
+// 顺序即下拉展示顺序：OpenAI 两个在前，Anthropic 放在最后
 export const PROTOCOLS: ProtocolMeta[] = [
-  {
-    value: 'anthropic-messages',
-    label: 'Anthropic Messages',
-    defaultBaseUrl: 'https://api.anthropic.com',
-    chatEndpoint: '/api/anthropic/messages',
-    modelsEndpoint: '/api/anthropic/models',
-  },
   {
     value: 'openai-chat-completions',
     label: 'OpenAI Chat Completions',
@@ -35,6 +29,13 @@ export const PROTOCOLS: ProtocolMeta[] = [
     defaultBaseUrl: 'https://api.openai.com/v1',
     chatEndpoint: '/api/openai/responses',
     modelsEndpoint: '/api/openai/responses/models',
+  },
+  {
+    value: 'anthropic-messages',
+    label: 'Anthropic Messages',
+    defaultBaseUrl: 'https://api.anthropic.com',
+    chatEndpoint: '/api/anthropic/messages',
+    modelsEndpoint: '/api/anthropic/models',
   },
 ]
 
