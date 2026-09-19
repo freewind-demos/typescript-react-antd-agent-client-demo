@@ -15,7 +15,8 @@ type ToolCallInfo = { name: string; input: { command: string; timeout?: number }
 
 // 聊天消息结构：角色 + 内容；tool 类型用于展示工具调用（content 为空，细节在 toolInfo）
 // toolPhase 区分两条独立气泡：call = 模型发起的命令，result = 命令的执行结果
-type ChatMessage = { role: 'user' | 'assistant' | 'tool'; content: string; toolInfo?: ToolCallInfo; toolPhase?: 'call' | 'result' }
+// error：Chat 过程中（请求 / 流式）失败时插入的错误条目，按时间顺序排在聊天流里（不再用 Toast）
+type ChatMessage = { role: 'user' | 'assistant' | 'tool' | 'error'; content: string; toolInfo?: ToolCallInfo; toolPhase?: 'call' | 'result' }
 
 // 会话里的一条交互记录：请求/响应各带 HTTP 元信息与协议 JSON 正文
 type InteractionRecord = {
@@ -411,12 +412,12 @@ export default function App() {
       return
     }
     const userMessage: ChatMessage = { role: 'user', content: text }
-    // 发给 Server 的历史：过滤掉 tool 气泡（Server 只认 user/assistant/system），
+    // 发给 Server 的历史：过滤掉 tool / error 条目（Server 只认 user/assistant/system），
     // 并合并连续的同角色消息、丢弃空内容 —— 工具调用点会把助手气泡切成多段
     //（preamble / 最终回答），这里合并回单条，避免上游因角色不交替而报错
     const history: Array<{ role: 'user' | 'assistant'; content: string }> = []
     for (const m of messages) {
-      if (m.role === 'tool' || !m.content) continue
+      if (m.role === 'tool' || m.role === 'error' || !m.content) continue
       const prev = history[history.length - 1]
       if (prev && prev.role === m.role) {
         prev.content += m.content
@@ -494,12 +495,15 @@ export default function App() {
         throw new Error(streamError)
       }
     } catch (err) {
-      message.error(String(err))
-      // 只移除还没内容的助手气泡（请求阶段就失败的情况）；
-      // 流式已输出过内容时保留，避免把用户已经看到的内容抹掉
+      const errorText = err instanceof Error ? err.message : String(err)
+      // 失败不再弹 Toast，而是作为一条错误条目按时间顺序写进聊天流；
+      // 请求阶段就失败时顺手去掉那个空的助手气泡（流式已输出过内容则保留，避免抹掉已看到的内容）
       setMessages((prev) => {
-        const last = prev[prev.length - 1]
-        return last && last.role === 'assistant' && last.content === '' ? prev.slice(0, -1) : prev
+        const next = [...prev]
+        const last = next[next.length - 1]
+        if (last && last.role === 'assistant' && last.content === '') next.pop()
+        next.push({ role: 'error', content: errorText })
+        return next
       })
     } finally {
       setSending(false)
@@ -671,6 +675,29 @@ export default function App() {
                           </Text>
                         </>
                       )}
+                    </Flex>
+                  </Flex>
+                )
+              }
+              // 错误条目：Chat 过程中（请求 / 流式）失败时插入，按时间顺序排在聊天流里
+              if (m.role === 'error') {
+                return (
+                  <Flex key={i} justify="center" style={{ marginBottom: 10 }}>
+                    <Flex
+                      vertical
+                      gap={2}
+                      style={{
+                        maxWidth: '85%',
+                        padding: '8px 12px',
+                        borderRadius: 8,
+                        background: '#fff1f0',
+                        border: '1px solid #ffa39e',
+                        color: '#a8071a',
+                        fontSize: 12,
+                      }}
+                    >
+                      <Text style={{ fontSize: 11, color: '#a8071a' }}>✕ error</Text>
+                      <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{m.content}</div>
                     </Flex>
                   </Flex>
                 )
