@@ -62,6 +62,8 @@ export const BASH_TOOL_RESPONSES = {
   name: BASH_TOOL_NAME,
   description: BASH_TOOL_DESCRIPTION,
   parameters: BASH_INPUT_SCHEMA,
+  // Responses API 的 FunctionTool 要求显式 strict 字段
+  strict: false,
 }
 
 // ---- 本地执行器 ----

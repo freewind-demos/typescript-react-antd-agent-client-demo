@@ -4,7 +4,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
 import { createLoggingFetch, type LogEvent } from './middleware.js'
-import { BASH_TOOL_ANTHROPIC, BASH_TOOL_CHAT, executeBash, formatBashResult, type BashResult } from './tools.js'
+import { BASH_TOOL_ANTHROPIC, BASH_TOOL_CHAT, BASH_TOOL_RESPONSES, executeBash, formatBashResult, type BashResult } from './tools.js'
 
 // 支持的三种协议标识
 export type Protocol = 'anthropic-messages' | 'openai-chat-completions' | 'openai-responses'
@@ -279,27 +279,63 @@ async function chatWithOpenAiChat(req: ChatRequest): Promise<ChatResult> {
   }
 }
 
-// OpenAI Responses 协议聊天
+// OpenAI Responses 协议聊天（带 Bash 工具循环）
 async function chatWithOpenAiResponses(req: ChatRequest): Promise<ChatResult> {
   const client = createClient('openai-responses', req.baseUrl, req.apiKey, req.onEvent) as OpenAI
-  // Responses API 的 input 用消息数组，content 直接传字符串
-  const input = req.messages.map((m) => ({ role: m.role, content: m.content }))
+  // 只暴露 Bash 这一个工具（Responses 的工具声明是扁平结构）
+  const tools: OpenAI.Responses.Tool[] = [BASH_TOOL_RESPONSES]
+  // Responses API 的 input 用消息数组，content 直接传字符串；后续轮次往同一数组追加工具往返
+  const input: OpenAI.Responses.ResponseInput = req.messages.map((m) => ({ role: m.role, content: m.content }))
 
+  // 非流式：内部跑完整 agent loop，只在最后一轮（无工具调用）返回文本
   if (!req.stream) {
-    const res = await client.responses.create({ model: req.model, input })
-    return { stream: false, text: res.output_text }
+    for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
+      const res = await client.responses.create({ model: req.model, input, tools })
+      const calls = res.output.filter((item): item is OpenAI.Responses.ResponseFunctionToolCall => item.type === 'function_call')
+      // 本轮没有工具调用：即为最终回答
+      if (calls.length === 0) {
+        return { stream: false, text: res.output_text }
+      }
+      // 先把所有 function_call 回放进 input，再追加各自的 function_call_output
+      for (const call of calls) {
+        input.push({ type: 'function_call', call_id: call.call_id, name: call.name, arguments: call.arguments })
+      }
+      for (const call of calls) {
+        const result = await runBashTool(parseToolArgs(call.arguments))
+        input.push({ type: 'function_call_output', call_id: call.call_id, output: formatBashResult(result) })
+      }
+    }
+    throw new Error(`agent loop exceeded ${MAX_AGENT_TURNS} turns`)
   }
 
-  const stream = await client.responses.create({ model: req.model, input, stream: true })
+  // 流式：逐轮请求，边收边 yield 文本；本轮出现工具调用则执行后进入下一轮
   return {
     stream: true,
     iterator: (async function* () {
-      for await (const event of stream) {
-        // 文本增量事件：response.output_text.delta
-        if (event.type === 'response.output_text.delta') {
-          yield event.delta
+      for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
+        const stream = await client.responses.create({ model: req.model, input, tools, stream: true })
+        // 本轮完成的 function_call（output_item.done 时 item 已是完整内容，含完整 arguments）
+        const calls: Array<{ call_id: string; name: string; arguments: string }> = []
+        for await (const event of stream) {
+          if (event.type === 'response.output_text.delta') {
+            // 文本增量：立即 yield 给前端（打字机效果）
+            yield event.delta
+          } else if (event.type === 'response.output_item.done' && event.item.type === 'function_call') {
+            calls.push({ call_id: event.item.call_id, name: event.item.name, arguments: event.item.arguments })
+          }
+        }
+        // 本轮无工具调用：整个 agent loop 结束
+        if (calls.length === 0) return
+        // 先把所有 function_call 回放进 input，再追加各自的 function_call_output
+        for (const call of calls) {
+          input.push({ type: 'function_call', call_id: call.call_id, name: call.name, arguments: call.arguments })
+        }
+        for (const call of calls) {
+          const result = await runBashTool(parseToolArgs(call.arguments))
+          input.push({ type: 'function_call_output', call_id: call.call_id, output: formatBashResult(result) })
         }
       }
+      throw new Error(`agent loop exceeded ${MAX_AGENT_TURNS} turns`)
     })(),
   }
 }
