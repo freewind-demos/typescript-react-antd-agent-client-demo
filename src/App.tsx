@@ -83,14 +83,16 @@ function mergeChunks(a: unknown, b: unknown, key?: string): unknown {
   return a
 }
 
-// 把一条新分片 payload 并入 delta 条目：
-// 能解析成 JSON 且与末尾 chunk 同结构则合并；否则（[DONE] 等非 JSON）原样新增一行
-function appendChunkPayload(entries: DeltaEntry[], ts: number, payload: string): DeltaEntry[] {
+// 把一条新分片行并入 delta 条目：
+// 行形如 `data: <x>` 时取 <x> 尝试 JSON 解析，能解析则按分片规则处理（与末尾 chunk 同结构才合并）；
+// 解析不出来的行（如 data: [DONE]、非 JSON 行）原样作为 line 条目展示，且不参与合并
+function appendChunkLine(entries: DeltaEntry[], ts: number, line: string): DeltaEntry[] {
+  const m = /^data:\s?(.*)$/s.exec(line)
   let json: unknown
   try {
-    json = JSON.parse(payload)
+    json = JSON.parse(m ? m[1] : line)
   } catch {
-    return [...entries, { kind: 'line', ts, payload }]
+    return [...entries, { kind: 'line', ts, payload: line }]
   }
   const last = entries[entries.length - 1]
   if (last && last.kind === 'chunk' && canMergeChunks(last.json, json)) {
@@ -101,13 +103,14 @@ function appendChunkPayload(entries: DeltaEntry[], ts: number, payload: string):
   return [...entries, { kind: 'chunk', ts, json }]
 }
 
-// delta Tab 的展示文本：chunk / line 都用「第一条的时间戳 + data 行」；其余事件原样
+// delta Tab 的展示文本：chunk 补回一条 `data: ` 行（与 wire 一致）；line 原样一行；其余事件原样块
 function renderDeltaText(entries: DeltaEntry[]): string {
   return entries
     .map((e) => {
       if (e.kind === 'raw') return e.text
       const head = `=== [CHUNK] @ ${new Date(e.ts).toISOString()} ===`
-      return `${head}\ndata: ${e.kind === 'line' ? e.payload : JSON.stringify(e.json)}`
+      const body = e.kind === 'line' ? e.payload : `data: ${JSON.stringify(e.json)}`
+      return `${head}\n${body}`
     })
     .join('\n\n')
 }
@@ -307,11 +310,11 @@ export default function App() {
         if (typeof data.text === 'string') {
           setLogText((prev) => prev + data.text + '\n\n')
         }
-        // delta Tab：chunk 分片展开成一条条 data JSON 并按规则合并；其余事件原样成块
-        if (data.type === 'chunk' && Array.isArray(data.chunkPayloads)) {
-          const payloads = data.chunkPayloads as string[]
-          if (payloads.length > 0) {
-            setDeltaEntries((prev) => payloads.reduce<DeltaEntry[]>((acc, payload) => appendChunkPayload(acc, data.timestamp, payload), prev))
+        // delta Tab：chunk 事件的每一行 —— 能解析成 JSON 的分片按规则合并，解析不了的（如 [DONE]）原样一行；其余事件原样成块
+        if (data.type === 'chunk' && Array.isArray(data.chunkLines)) {
+          const lines = data.chunkLines as string[]
+          if (lines.length > 0) {
+            setDeltaEntries((prev) => lines.reduce<DeltaEntry[]>((acc, line) => appendChunkLine(acc, data.timestamp, line), prev))
           }
         } else if (typeof data.text === 'string') {
           setDeltaEntries((prev) => [...prev, { kind: 'raw', text: data.text }])
