@@ -2,9 +2,10 @@
 // + 微信式聊天区 + 日志面板（实时原样展示当前会话的所有请求与响应）
 
 import { useEffect, useRef, useState } from 'react'
-import { AutoComplete, Button, Card, Flex, Input, Select, Space, Splitter, Switch, Tabs, Typography, message } from 'antd'
-import { PROTOCOLS, type Protocol } from './protocols'
-import { getKeyHistoryForUrl, getLatestKeyForUrl, getModelHistory, getUrlHistory, recordConfigUsed as saveConfigUsed } from './config'
+import { Button, Card, Flex, Input, Popconfirm, Space, Splitter, Switch, Tabs, Typography, message } from 'antd'
+import { PROTOCOLS } from './protocols'
+import { getProviders, getSelectedProviderId, saveProviders, saveSelectedProviderId, type Provider } from './config'
+import ProviderModal, { type ProviderDraft } from './ProviderModal'
 
 const { TextArea } = Input
 const { Text } = Typography
@@ -163,19 +164,12 @@ function renderSessionJsonc(records: InteractionRecord[]): string {
 }
 
 export default function App() {
-  // ---- 配置区状态 ----
-  const [protocol, setProtocol] = useState<Protocol>('anthropic-messages')
-  // URL 与协议无关（全局历史最近一条）；Key 跟随 URL（初始取该 URL 的最近一条）
-  const [baseUrl, setBaseUrlState] = useState(() => getUrlHistory()[0] ?? '')
-  const [apiKey, setApiKey] = useState(() => getLatestKeyForUrl(getUrlHistory()[0] ?? '') ?? '')
-  // 全局 URL 历史 + 当前 URL 的 Key 历史（驱动两个 AutoComplete 下拉）
-  const [urlHistory, setUrlHistory] = useState<string[]>(() => getUrlHistory())
-  const [keyHistory, setKeyHistory] = useState<string[]>(() => getKeyHistoryForUrl(getUrlHistory()[0] ?? ''))
-  // 全局模型历史（用过的模型，与协议无关），与 Fetch 到的模型合并去重后作为下拉选项
-  const [modelHistory, setModelHistory] = useState<string[]>(() => getModelHistory())
-  const [models, setModels] = useState<string[]>([])
-  const [model, setModel] = useState<string | undefined>(undefined)
-  const [fetching, setFetching] = useState(false)
+  // ---- 配置区状态：Provider 列表（持久化）+ 当前选中 + 添加/编辑弹窗 ----
+  const [providers, setProviders] = useState<Provider[]>(() => getProviders())
+  const [selectedProviderId, setSelectedProviderId] = useState<string | null>(() => getSelectedProviderId())
+  const [modalOpen, setModalOpen] = useState(false)
+  const [editingProvider, setEditingProvider] = useState<Provider | null>(null)
+  // 全局流式开关（与具体 Provider 无关）
   const [stream, setStream] = useState(true)
 
   // ---- 聊天区状态 ----
@@ -201,29 +195,47 @@ export default function App() {
   // 日志面板当前选中的 Tab（右侧清空按钮据此清对应的数据）
   const [activeLogTab, setActiveLogTab] = useState('current')
 
-  // 当前协议对应的元数据（Endpoint 等）
-  const meta = PROTOCOLS.find((p) => p.value === protocol)!
+  // 当前选中的 Provider（选中项不存在时回退到第一条）
+  const selectedProvider = providers.find((p) => p.id === selectedProviderId) ?? providers[0] ?? null
+  // 对应协议的元数据（Endpoint 等）
+  const selectedMeta = selectedProvider ? PROTOCOLS.find((p) => p.value === selectedProvider.protocol)! : null
 
-  // 切换协议：只重置模型（URL / Key 与协议无关，保持不变，历史也可跨协议复用）
-  const onProtocolChange = (value: Protocol) => {
-    setProtocol(value)
-    setModels([])
-    setModel(undefined)
+  // 持久化：更新 Provider 列表
+  const updateProviders = (next: Provider[]) => {
+    setProviders(next)
+    saveProviders(next)
   }
-
-  // 从下拉选中历史 URL 时：带出该 URL 上次成功使用的 Key，并刷新 Key 下拉
-  const onSelectUrl = (value: string) => {
-    setBaseUrlState(value)
-    setApiKey(getLatestKeyForUrl(value) ?? '')
-    setKeyHistory(getKeyHistoryForUrl(value))
+  // 持久化：切换选中的 Provider
+  const selectProvider = (id: string | null) => {
+    setSelectedProviderId(id)
+    saveSelectedProviderId(id)
   }
-
-  // 成功使用后记录配置历史：URL 进全局历史，Key 进该 URL 的专属历史，模型进全局模型历史
-  const recordConfigUsed = (url: string, key: string, usedModel?: string) => {
-    const saved = saveConfigUsed(url, key, usedModel)
-    setUrlHistory(saved.urlHistory)
-    setKeyHistory(saved.keyHistory)
-    setModelHistory(saved.modelHistory)
+  // 打开"添加"弹窗
+  const openAddProvider = () => {
+    setEditingProvider(null)
+    setModalOpen(true)
+  }
+  // 打开"编辑"弹窗
+  const openEditProvider = (p: Provider) => {
+    setEditingProvider(p)
+    setModalOpen(true)
+  }
+  // 弹窗保存：新增或更新（新增后自动选中）
+  const submitProvider = (draft: ProviderDraft) => {
+    if (editingProvider) {
+      updateProviders(providers.map((p) => (p.id === editingProvider.id ? { ...p, ...draft } : p)))
+    } else {
+      const created: Provider = { id: crypto.randomUUID(), ...draft }
+      updateProviders([...providers, created])
+      selectProvider(created.id)
+    }
+    setModalOpen(false)
+  }
+  // 删除 Provider（若删的是当前选中项，选中回退到剩下第一条）
+  const deleteProvider = (p: Provider) => {
+    const next = providers.filter((x) => x.id !== p.id)
+    updateProviders(next)
+    if (selectedProvider?.id === p.id) selectProvider(next[0]?.id ?? null)
   }
 
   // 新会话：生成新 sessionId（新日志文件），清空聊天与日志
@@ -388,47 +400,14 @@ export default function App() {
     if (el) el.scrollTop = el.scrollHeight
   }, [sessionJson])
 
-  // Fetch Models：调用当前协议的模型接口，返回模型列表
-  const fetchModels = async () => {
-    if (!baseUrl || !apiKey) {
-      message.warning('请先填写 API URL 和 API Key')
-      return
-    }
-    setFetching(true)
-    try {
-      const res = await fetch(meta.modelsEndpoint, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ baseUrl, apiKey, sessionId }),
-      })
-      const data = await res.json()
-      if (!res.ok) {
-        throw new Error(data.error || `HTTP ${res.status}`)
-      }
-      setModels(data.models ?? [])
-      // 如果实际使用的地址与填写的不一致（自动上溯过），提示用户，避免困惑
-      if (data.usedBaseUrl && data.usedBaseUrl !== baseUrl) {
-        message.info(`模型列表来自 ${data.usedBaseUrl}`)
-      }
-      // 成功拉到模型后记录本次使用的配置到历史（去重置顶）
-      recordConfigUsed(baseUrl, apiKey)
-      // 拿到列表后默认选中第一个
-      if (data.models?.length) {
-        setModel(data.models[0])
-      }
-    } catch (err) {
-      message.error(String(err))
-    } finally {
-      setFetching(false)
-    }
-  }
-
   // 发送消息：流式 / 非流式两条路径
   const handleSend = async () => {
     const text = input.trim()
     if (!text || sending) return
-    if (!baseUrl || !apiKey || !model) {
-      message.warning('请先填写 API URL / API Key 并选择模型')
+    const provider = selectedProvider
+    const meta = selectedMeta
+    if (!provider || !meta) {
+      message.warning('请先添加并选择一个 Provider')
       return
     }
     const userMessage: ChatMessage = { role: 'user', content: text }
@@ -455,7 +434,7 @@ export default function App() {
       const res = await fetch(meta.chatEndpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ baseUrl, apiKey, model, messages: requestMessages, stream, sessionId }),
+        body: JSON.stringify({ baseUrl: provider.baseUrl, apiKey: provider.apiKey, model: provider.model, messages: requestMessages, stream, sessionId }),
       })
       if (!res.ok) {
         const data = await res.json().catch(() => null)
@@ -476,8 +455,6 @@ export default function App() {
         // 非流式：一次性拿到完整文本
         const data = await res.json()
         appendAssistant(data.text ?? '')
-        // 聊天成功：记录本次使用的配置（含模型）到历史
-        recordConfigUsed(baseUrl, apiKey, model)
         return
       }
 
@@ -516,8 +493,6 @@ export default function App() {
       if (streamError) {
         throw new Error(streamError)
       }
-      // 流式正常读完（收到连接结束）：记录本次使用的配置（含模型）到历史
-      recordConfigUsed(baseUrl, apiKey, model)
     } catch (err) {
       message.error(String(err))
       // 只移除还没内容的助手气泡（请求阶段就失败的情况）；
@@ -542,8 +517,6 @@ export default function App() {
   const sessionJsonText = sessionJson.length > 0 ? renderSessionJsonc(sessionJson) : ''
   // Tab3 显示 delta 视图（与 raw 同内容，但结构一致的连续分片已合并）
   const deltaText = renderDeltaText(deltaEntries)
-  // 模型下拉选项：历史用过的模型 + 当前 Fetch 到的模型（去重，历史在前）
-  const modelOptions = [...new Set([...modelHistory, ...models])].map((m) => ({ value: m }))
 
   // 复制当前选中 Tab 正在显示的内容（与"清空"按钮一样常驻显示）
   const copyCurrentTab = async () => {
@@ -580,61 +553,70 @@ export default function App() {
         {/* ---- 左侧面板：配置区 + 聊天区 ---- */}
         <Splitter.Panel defaultSize="40%" min="25%" max="70%">
           <Flex vertical gap={12} style={{ height: '100%', minWidth: 0, paddingRight: 6 }}>
-        {/* 顶部配置区：三行布局 */}
-        <Card size="small" title="Agent Client 配置">
-          <Space direction="vertical" size="small" style={{ width: '100%' }}>
-            {/* 第一行：协议（无标签）+ API URL + API Key，全部 small */}
-            <Space wrap>
-              <Select
-                value={protocol}
-                onChange={onProtocolChange}
-                options={PROTOCOLS.map((p) => ({ value: p.value, label: p.label }))}
-                size="small"
-                popupMatchSelectWidth={false}
-                style={{ width: 170 }}
-              />
-              <AutoComplete
-                value={baseUrl}
-                onChange={setBaseUrlState}
-                onSelect={onSelectUrl}
-                options={urlHistory.map((h) => ({ value: h }))}
-                placeholder="API URL"
-                size="small"
-                popupMatchSelectWidth={false}
-                style={{ width: 320 }}
-              />
-              <AutoComplete
-                value={apiKey}
-                onChange={setApiKey}
-                options={keyHistory.map((h) => ({ value: h }))}
-                placeholder="API Key"
-                size="small"
-                popupMatchSelectWidth={false}
-                style={{ width: 180 }}
-              />
-            </Space>
-            {/* 第二行：模型选择 + Fetch Models（在右） */}
-            <Space wrap>
-              <AutoComplete
-                value={model}
-                onChange={setModel}
-                options={modelOptions}
-                placeholder="选择或输入模型"
-                size="small"
-                style={{ width: 200 }}
-                popupMatchSelectWidth={false}
-              />
-              <Button size="small" onClick={fetchModels} loading={fetching}>
-                Fetch Models
-              </Button>
-            </Space>
-            {/* 第三行：流式开关 */}
-            <Space wrap>
-              <span>流式</span>
-              <Switch size="small" checked={stream} onChange={setStream} />
-            </Space>
-          </Space>
+        {/* 全局流式开关（与具体 Provider 无关，放在最外层） */}
+        <Flex align="center" gap={8}>
+          <Text>流式</Text>
+          <Switch size="small" checked={stream} onChange={setStream} />
+        </Flex>
+
+        {/* Providers：可添加 / 编辑 / 删除 / 选择的接入配置列表 */}
+        <Card
+          size="small"
+          title="Providers"
+          extra={
+            <Button size="small" onClick={openAddProvider}>
+              添加
+            </Button>
+          }
+        >
+          {providers.length === 0 ? (
+            <Text type="secondary">还没有 Provider，点右上角“添加”新建一个</Text>
+          ) : (
+            <Flex vertical gap={6}>
+              {providers.map((p) => {
+                const selected = selectedProvider?.id === p.id
+                const protocolLabel = PROTOCOLS.find((x) => x.value === p.protocol)?.label ?? p.protocol
+                return (
+                  <Flex
+                    key={p.id}
+                    align="center"
+                    gap={8}
+                    onClick={() => selectProvider(p.id)}
+                    style={{
+                      cursor: 'pointer',
+                      padding: '6px 8px',
+                      borderRadius: 6,
+                      border: `1px solid ${selected ? '#1677ff' : '#f0f0f0'}`,
+                      background: selected ? '#e6f4ff' : '#fafafa',
+                    }}
+                  >
+                    <span style={{ color: selected ? '#1677ff' : '#bfbfbf' }}>{selected ? '●' : '○'}</span>
+                    <Flex vertical style={{ flex: 1, minWidth: 0 }}>
+                      <span style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.model || '（未填模型）'}</span>
+                      <span style={{ fontSize: 11, color: '#8c8c8c', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {protocolLabel} · {p.baseUrl} · {p.apiKey}
+                      </span>
+                    </Flex>
+                    {/* 操作按钮：阻止冒泡，避免点它们时触发整行的"选中" */}
+                    <Flex gap={4} align="center" onClick={(e) => e.stopPropagation()}>
+                      <Button size="small" type="link" onClick={() => openEditProvider(p)}>
+                        编辑
+                      </Button>
+                      <Popconfirm title="确定删除该 Provider？" okText="删除" cancelText="取消" onConfirm={() => deleteProvider(p)}>
+                        <Button size="small" type="link" danger>
+                          删除
+                        </Button>
+                      </Popconfirm>
+                    </Flex>
+                  </Flex>
+                )
+              })}
+            </Flex>
+          )}
         </Card>
+
+        {/* 添加 / 编辑 Provider 弹窗 */}
+        <ProviderModal open={modalOpen} initial={editingProvider} sessionId={sessionId} onCancel={() => setModalOpen(false)} onSubmit={submitProvider} />
 
         {/* 聊天区 */}
         <Card
@@ -651,7 +633,7 @@ export default function App() {
           <Flex vertical style={{ flex: 1, overflowY: 'auto', padding: 4 }}>
             {messages.length === 0 && (
               <Flex justify="center" style={{ marginTop: 40 }}>
-                <Text type="secondary">填写配置并 Fetch Models 后，开始聊天吧</Text>
+                <Text type="secondary">添加并选择一个 Provider 后，开始聊天吧</Text>
               </Flex>
             )}
             {messages.map((m, i) => {
