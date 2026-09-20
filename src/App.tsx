@@ -4,7 +4,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Button, Card, Flex, Input, Popconfirm, Space, Splitter, Switch, Tabs, Typography, message } from 'antd'
 import { PROTOCOLS } from './protocols'
-import { appendChunkLine, renderDeltaText, type DeltaEntry } from './delta'
+import { appendChunkText, appendRawEvent, emptyDelta, flushDeltaPending, renderDeltaText, type DeltaState } from './delta'
 import { getProviders, getSelectedProviderId, saveProviders, saveSelectedProviderId, type Provider } from './config'
 import ProviderModal, { type ProviderDraft } from './ProviderModal'
 
@@ -115,8 +115,8 @@ export default function App() {
   const [sessionId, setSessionId] = useState(() => crypto.randomUUID())
   // 当前会话的 verbose 原样日志文本（初始从文件全量拉取，之后实时追加）
   const [logText, setLogText] = useState('')
-  // Tab3「delta」的条目：chunk 分片按规则合并，其余事件为原样块
-  const [deltaEntries, setDeltaEntries] = useState<DeltaEntry[]>([])
+  // Tab3「delta」的状态：chunk 按 SSE 事件边界累积合并，其余事件为原样块
+  const [deltaState, setDeltaState] = useState<DeltaState>(() => emptyDelta())
   // Tab2「会话」的显示数据：完整交互记录数组（一项 = 一个请求 + 一个回复）
   const [sessionJson, setSessionJson] = useState<InteractionRecord[]>([])
   // Tab1「请求/响应」的显示数据：只保留最新一次交互（与 sessionJson 独立持有，清空互不影响）
@@ -176,7 +176,7 @@ export default function App() {
     setSessionId(crypto.randomUUID())
     setMessages([])
     setLogText('')
-    setDeltaEntries([])
+    setDeltaState(emptyDelta())
     setSessionJson([])
     setCurrentPair(null)
   }
@@ -184,7 +184,7 @@ export default function App() {
   // 四个 Tab 各自的清空：只清自己的显示数据，互不影响
   const clearTab1 = () => setCurrentPair(null) // Tab1「请求/响应」
   const clearTab2 = () => setSessionJson([]) // Tab2「会话」
-  const clearTabDelta = () => setDeltaEntries([]) // Tab3「delta」
+  const clearTabDelta = () => setDeltaState(emptyDelta()) // Tab3「delta」
   const clearTabRaw = () => setLogText('') // Tab4「raw」
 
   // 清空当前选中的 Tab（按钮在 Tab 标题行最右侧）
@@ -222,14 +222,17 @@ export default function App() {
         if (typeof data.text === 'string') {
           setLogText((prev) => prev + data.text + '\n\n')
         }
-        // delta Tab：chunk 事件的每一行 —— 能解析成 JSON 的分片按规则合并，解析不了的（如 [DONE]）原样一行；其余事件原样成块
-        if (data.type === 'chunk' && Array.isArray(data.chunkLines)) {
-          const lines = data.chunkLines as string[]
-          if (lines.length > 0) {
-            setDeltaEntries((prev) => lines.reduce<DeltaEntry[]>((acc, line) => appendChunkLine(acc, data.timestamp, line), prev))
-          }
+        // delta Tab：chunk 的原始文本按 SSE 事件边界累积（未收完的尾巴留到下次拼接，保证 event:/data: 同块）；
+        // 一轮流结束或中断时把尾巴冲出；其余协议事件原样成块
+        if (data.type === 'chunk' && typeof data.chunkText === 'string') {
+          setDeltaState((prev) => appendChunkText(prev, data.timestamp, data.chunkText))
+        } else if (data.type === 'end' || data.type === 'error') {
+          setDeltaState((prev) => {
+            const flushed = flushDeltaPending(prev, data.timestamp)
+            return typeof data.text === 'string' ? appendRawEvent(flushed, data.text) : flushed
+          })
         } else if (typeof data.text === 'string') {
-          setDeltaEntries((prev) => [...prev, { kind: 'raw', text: data.text }])
+          setDeltaState((prev) => appendRawEvent(prev, data.text))
         }
         // 新请求：追加一条交互记录到 Tab2（带元信息与请求体），响应暂空；Tab1 同步为最新一条
         if (data.requestJson !== undefined) {
@@ -326,7 +329,7 @@ export default function App() {
   useEffect(() => {
     const el = deltaBoxRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [deltaEntries])
+  }, [deltaState])
 
   useEffect(() => {
     const el = jsonBoxRef.current
@@ -451,8 +454,8 @@ export default function App() {
     : ''
   // Tab2 显示整个会话：JSONC 数组，一项 = 一个请求 + 一个回复（各自的元信息以注释写在正文前）
   const sessionJsonText = sessionJson.length > 0 ? renderSessionJsonc(sessionJson) : ''
-  // Tab3 显示 delta 视图（与 raw 同内容，但结构一致的连续分片已合并）
-  const deltaText = renderDeltaText(deltaEntries)
+  // Tab3 显示 delta 视图（与 raw 同内容，但以完整 SSE 事件为单位、结构一致的连续事件已合并）
+  const deltaText = renderDeltaText(deltaState)
 
   // 复制当前选中 Tab 正在显示的内容（与"清空"按钮一样常驻显示）
   const copyCurrentTab = async () => {
@@ -753,8 +756,9 @@ export default function App() {
                     </Flex>
                   ),
                 },
-                // Tab3：delta —— 与 raw 同内容，但把"结构完全一致"的连续分片合并成一条
-                //（便于一眼看清真正有变化的事件；REQUEST/RESPONSE/TOOL 等其余块原样）
+                // Tab3：delta —— 与 raw 同内容，但按完整 SSE 事件展示（event: / data: 同一个块），
+                // 并把"结构完全一致"的连续事件合并成一条（便于一眼看清真正有变化的事件）
+                //（REQUEST/RESPONSE 等其余块原样）
                 {
                   key: 'delta',
                   label: 'delta',
@@ -765,7 +769,7 @@ export default function App() {
                         vertical
                         style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
                       >
-                        {deltaText || '（暂无日志。与 raw 相同的内容，但把结构完全一致的连续分片合并成一条，方便看事件结构的变化）'}
+                        {deltaText || '（暂无日志。与 raw 相同的内容，但以完整 SSE 事件（event: / data:）为单位展示，结构完全一致的连续事件合并成一条）'}
                       </Flex>
                     </Flex>
                   ),
