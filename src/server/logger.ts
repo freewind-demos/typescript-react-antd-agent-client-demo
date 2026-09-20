@@ -1,14 +1,16 @@
 // 日志写入器：把中间件产生的日志事件落盘到文件，并实时广播给前端
-// 每个会话（sessionId）两份文件：
-//   logs/<sessionId>.log  —— 协议真实收发的原样日志（request / response / chunk / error；
-//                            [TOOL] / [END] 等本地信息不写入）
-//   logs/<sessionId>.json —— 整个会话的结构化 JSON（request 的 headers/body、response 的 status/headers、提取的回复文本）
+// 每个会话（sessionId）三份文件：
+//   logs/<sessionId>.log       —— 协议真实收发的原样日志（request / response / chunk / error；
+//                                 [TOOL] / [END] 等本地信息不写入）
+//   logs/<sessionId>.json      —— 整个会话的结构化 JSON（request 的 headers/body、response 的 status/headers、提取的回复文本）
+//   logs/<sessionId>.delta.log —— 会话的 delta 日志（内容与前端 delta Tab 逐字一致，随事件整份重写）
 // 前端日志面板四个 Tab：请求/响应、会话、delta（与 raw 同源，但合并结构一致的连续分片）、raw（原样底层日志）。
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { LogEvent } from './middleware.js'
 import type { Protocol } from './clients.js'
+import { appendChunkLine, renderDeltaText, type DeltaEntry } from '../delta.js'
 
 // 日志目录：项目根下的 logs/（已在 .gitignore 忽略）
 export const LOGS_DIR = join(process.cwd(), 'logs')
@@ -205,6 +207,8 @@ type SessionState = {
   events: unknown[]
   // 当前请求使用的协议（聚合时用）
   protocol: Protocol | undefined
+  // 会话的 delta 条目（与前端 delta Tab 同规则累积，落盘到 <sessionId>.delta.log）
+  delta: DeltaEntry[]
 }
 
 // 日志管理器：维护会话的 verbose 文件、协议 JSON（内存 + 落盘）与 SSE 订阅者
@@ -247,7 +251,7 @@ export class LogManager {
     // chunk 事件里的每个非空行（保留原始文本，含 data: 前缀；含 [DONE] 等非 JSON 行），
     // 供前端 delta Tab 原样展示与合并 —— 真实收到的行一条都不丢
     let chunkLines: string[] | undefined
-    const state = this.sessionStates[sessionId] ?? (this.sessionStates[sessionId] = { interactions: [], events: [], protocol: undefined })
+    const state = this.sessionStates[sessionId] ?? (this.sessionStates[sessionId] = { interactions: [], events: [], protocol: undefined, delta: [] })
 
     if (event.type === 'request') {
       // 新的一次交互开始：记录请求元信息与请求体，重置当前响应事件
@@ -292,6 +296,20 @@ export class LogManager {
       }
     }
 
+    // ---- 同步 Delta 日志：内容与前端 delta Tab 完全一致 ----
+    // chunk 的每个 data: 行按分片规则并入；request/response/error 原样成块（与 isProtocolEvent 口径一致）
+    if (event.type === 'chunk') {
+      if (chunkLines && chunkLines.length > 0) {
+        for (const line of chunkLines) {
+          state.delta = appendChunkLine(state.delta, event.timestamp, line)
+        }
+        this.writeDeltaFile(sessionId, state)
+      }
+    } else if (isProtocolEvent(event)) {
+      state.delta = [...state.delta, { kind: 'raw', text: formatLogEvent(event) }]
+      this.writeDeltaFile(sessionId, state)
+    }
+
     // ---- 广播给前端：SSE 格式 data: JSON\n\n ----
     // text 只给协议事件（前端据此追加日志视图；[TOOL] 等不带 text，因此不会出现在日志里，
     // 但事件本身照常广播，供 Chat 面板渲染工具气泡）
@@ -309,6 +327,11 @@ export class LogManager {
       this.jsonPaths[sessionId] = jsonPath
     }
     writeFileSync(jsonPath, JSON.stringify(state.interactions, null, 2))
+  }
+
+  // 把会话的 delta 条目渲染后整份写入 Delta 日志文件（覆盖写，保持与前端 delta Tab 一致）
+  private writeDeltaFile(sessionId: string, state: SessionState): void {
+    writeFileSync(join(LOGS_DIR, `${this.safeName(sessionId)}.delta.log`), renderDeltaText(state.delta))
   }
 
   // 读取某个会话的完整 verbose 日志文件内容
