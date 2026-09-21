@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Button, Card, Flex, Input, Popconfirm, Space, Splitter, Switch, Tabs, Typography, message } from 'antd'
-import { PROTOCOLS } from './protocols'
+import { PROTOCOLS, type Protocol } from './protocols'
 import { appendChunkText, appendRawEvent, emptyDelta, flushDeltaPending, renderDeltaText, type DeltaState } from './delta'
 import { getProviders, getSelectedProviderId, saveProviders, saveSelectedProviderId, type Provider } from './config'
 import ProviderModal, { type ProviderDraft } from './ProviderModal'
@@ -104,6 +104,8 @@ export default function App() {
   const [editingProvider, setEditingProvider] = useState<Provider | null>(null)
   // 全局流式开关（与具体 Provider 无关）
   const [stream, setStream] = useState(true)
+  // 当前会话绑定的协议：会话历史是协议原生的报文（见 server/conversation.ts），换协议必须开新会话
+  const [sessionProtocol, setSessionProtocol] = useState<Protocol | null>(null)
 
   // ---- 聊天区状态 ----
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -112,7 +114,7 @@ export default function App() {
 
   // ---- 日志区状态 ----
   // sessionId：每个会话一个，切换即换日志文件
-  const [sessionId, setSessionId] = useState(() => crypto.randomUUID())
+  const [sessionId, setSessionId] = useState<string>(() => crypto.randomUUID())
   // 当前会话的 verbose 原样日志文本（初始从文件全量拉取，之后实时追加）
   const [logText, setLogText] = useState('')
   // Tab3「delta」的状态：chunk 按 SSE 事件边界累积合并，其余事件为原样块
@@ -171,15 +173,19 @@ export default function App() {
     if (selectedProvider?.id === p.id) selectProvider(next[0]?.id ?? null)
   }
 
-  // 新会话：生成新 sessionId（新日志文件），清空聊天与日志
-  const newSession = () => {
-    setSessionId(crypto.randomUUID())
+  // 清空本地展示并与指定 sessionId 对齐（新建会话 / 换协议时用）
+  const resetConversation = (nextSessionId: string) => {
+    setSessionId(nextSessionId)
     setMessages([])
     setLogText('')
     setDeltaState(emptyDelta())
     setSessionJson([])
     setCurrentPair(null)
+    setSessionProtocol(null)
   }
+
+  // 新会话：生成新 sessionId（新日志文件），清空聊天与日志
+  const newSession = () => resetConversation(crypto.randomUUID())
 
   // 四个 Tab 各自的清空：只清自己的显示数据，互不影响
   const clearTab1 = () => setCurrentPair(null) // Tab1「请求/响应」
@@ -346,6 +352,15 @@ export default function App() {
       message.warning('请先添加并选择一个 Provider')
       return
     }
+    // 换协议必须开新会话：历史是上一个协议的原生报文，跨协议复用会发出错误结构。
+    //（服务端也有同样的保护：协议不一致时视为新会话，见 server/conversation.ts）
+    let activeSessionId = sessionId
+    if (sessionProtocol !== null && sessionProtocol !== provider.protocol) {
+      activeSessionId = crypto.randomUUID()
+      resetConversation(activeSessionId)
+    }
+    setSessionProtocol(provider.protocol)
+
     const userMessage: ChatMessage = { role: 'user', content: text }
     // 只把「这一句」发给 Server：会话历史由 Server 按 sessionId 持有、只追加不重建，
     // 前端不再自己拼接/合并历史（那样会改写报文，丢掉 tool_calls / thinking 等字段）。
@@ -358,7 +373,7 @@ export default function App() {
       const res = await fetch(meta.chatEndpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ baseUrl: provider.baseUrl, apiKey: provider.apiKey, model: provider.model, text, stream, sessionId }),
+        body: JSON.stringify({ baseUrl: provider.baseUrl, apiKey: provider.apiKey, model: provider.model, text, stream, sessionId: activeSessionId }),
       })
       if (!res.ok) {
         const data = await res.json().catch(() => null)
