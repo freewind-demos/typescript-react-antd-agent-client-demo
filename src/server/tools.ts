@@ -1,7 +1,7 @@
 // Bash 工具：本 demo 中 Agent 唯一的工具。
 // 这里提供两份东西：
 //   1) 三种协议各自的工具声明（同一份 JSON Schema，只是外层包装不同）
-//   2) 本地命令执行器（子进程执行、合并 stdout/stderr、退出码、超时、输出截断）
+//   2) 本地命令执行器（子进程执行、输出拼接（先全部 stdout 再全部 stderr）、退出码、超时、输出截断）
 
 import { exec } from 'node:child_process'
 
@@ -17,7 +17,7 @@ const MAX_OUTPUT_CHARS = 20_000
 
 // 工具描述：让模型判断何时该调用
 const BASH_TOOL_DESCRIPTION = [
-  'Execute a shell command on the local machine (running in the project root) and return its combined stdout/stderr and exit code.',
+  'Execute a shell command on the local machine (running in the project root) and return its output (all of stdout first, then all of stderr, without preserving the real interleaving) and exit code.',
   `Default timeout is ${DEFAULT_TIMEOUT} ms; override it with the "timeout" argument (in milliseconds).`,
 ].join(' ')
 
@@ -76,7 +76,7 @@ export type BashInput = {
 
 // 一次 Bash 调用的执行结果
 export type BashResult = {
-  // 合并后的 stdout + stderr（可能被截断）
+  // 命令结束后拼接的输出：先全部 stdout、再全部 stderr（不是两者真实的交错顺序；可能被截断）
   output: string
   // 进程退出码；被信号/超时中断等异常结束时为 -1
   exitCode: number
@@ -95,7 +95,8 @@ function truncate(text: string): { text: string; truncated: boolean } {
   }
 }
 
-// 执行一条 shell 命令：cwd 为项目根，合并 stdout/stderr，带超时
+// 执行一条 shell 命令：cwd 为项目根，带超时。
+// 输出不是真实交错的 stdout/stderr：命令结束后才拼接，先全部 stdout、再全部 stderr
 export function executeBash(input: BashInput): Promise<BashResult> {
   // 入参未提供（或非正数）时用默认超时
   const timeout = input.timeout && input.timeout > 0 ? input.timeout : DEFAULT_TIMEOUT

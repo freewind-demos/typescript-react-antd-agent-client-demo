@@ -95,7 +95,7 @@ Demo 只给模型提供**一个**工具 `Bash`（`command` 必填，`timeout` �
 | OpenAI Chat Completions | `{ type: 'function', function: { name, description, parameters } }` | `message.tool_calls` | `role: 'tool'` 消息（带 `tool_call_id`） |
 | OpenAI Responses | `{ type: 'function', name, description, parameters, strict }` | `function_call` output item | `function_call_output` item（带 `call_id`） |
 
-**工具执行**：`src/server/tools.ts` 的 `executeBash()` 用 Node 的 `child_process` 在 Server 上执行命令，工作目录为项目根，合并 stdout/stderr，返回退出码；默认 30s 超时（可被 `timeout` 参数覆盖），输出超过 20000 字符自动截断。
+**工具执行**：`src/server/tools.ts` 的 `executeBash()` 用 Node 的 `child_process` 在 Server 上执行命令，工作目录为项目根，返回退出码；输出在命令结束后拼接为一段——先全部 stdout、再全部 stderr，**不保留两者真实的交错顺序**；默认 30s 超时（可被 `timeout` 参数覆盖），输出超过 20000 字符自动截断。
 
 **Agent 循环**：三种协议的 chat 函数（`src/server/clients.ts`）内部都跑同一个循环——请求模型 → 若模型要调用工具就执行 Bash 并把结果回传 → 再请求模型，直到模型不再调用工具（最多 20 轮）。循环产出统一的**结构化事件流**（`text` / `tool`）：流式逐条推给前端，非流式收集完整后一次性返回（`{ events: [...] }`）——两者同一套事件语义。
 
@@ -117,7 +117,7 @@ Client 的原则是 **「历史只追加、不重建；收到什么就回放什�
 
 **为什么 `reasoning_content` 这类字段要专门照顾**：它不是 OpenAI 官方 Chat Completions 协议的东西，是上游（DeepSeek 系）自己加的扩展，SDK 类型里没有。类型层用交叉类型 `& Record<string, unknown>` 放开，运行时 SDK 不会剥掉它不认识的字段。另外 **DeepSeek 官方要求工具调用轮必须把 `reasoning_content` 传回去**（不带直接 400：`The reasoning_content in the thinking mode must be passed back to the API.`；实测带 `""` 空串也能过）。
 
-**换协议**：会话历史是协议原生的，不能跨协议复用。前端记住会话绑定的协议，换 Provider 协议时自动开新会话；服务端 `ConversationStore` 也有同样保护（协议不一致时视为新会话）。
+**换 Provider**：会话历史是协议原生的，既不能跨协议复用、也不能跨 Provider 复用。前端记住当前会话绑定的 Provider 指纹（id + 协议 + API URL + 模型）：选中别的 Provider 立即开新会话，发送时发现指纹变了也开新会话；服务端 `ConversationStore` 另有协议层保护（协议不一致时视为新会话）。
 
 **已知限制**：会话只存在服务端内存里，服务重启即清空（`logs/` 下的日志文件仍在）。
 
