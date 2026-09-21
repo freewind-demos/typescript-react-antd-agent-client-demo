@@ -532,13 +532,17 @@ export default function App() {
                 const selected = selectedProvider?.id === p.id
                 const protocolLabel = PROTOCOLS.find((x) => x.value === p.protocol)?.label ?? p.protocol
                 return (
+                  // 发送期间禁止切换 Provider：旧请求返回后仍会把它的内容写进已经清空的会话界面
                   <Flex
                     key={p.id}
                     align="center"
                     gap={8}
-                    onClick={() => selectProvider(p.id)}
+                    onClick={() => {
+                      if (!sending) selectProvider(p.id)
+                    }}
                     style={{
-                      cursor: 'pointer',
+                      cursor: sending ? 'not-allowed' : 'pointer',
+                      opacity: sending ? 0.6 : 1,
                       padding: '6px 8px',
                       borderRadius: 6,
                       border: `1px solid ${selected ? '#1677ff' : '#f0f0f0'}`,
@@ -580,7 +584,8 @@ export default function App() {
           size="small"
           title="聊天"
           extra={
-            <Button size="small" onClick={newSession}>
+            // 发送期间禁用：旧请求返回后仍会把内容写进已经清空的新会话界面
+            <Button size="small" disabled={sending} onClick={newSession}>
               新会话
             </Button>
           }
