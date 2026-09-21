@@ -19,13 +19,14 @@ const conversationStore = new ConversationStore()
 // 通用聊天 handler：按协议分发，日志事件绑定到请求里的 sessionId
 function handleChat(protocol: Protocol) {
   return async (req: express.Request, res: express.Response) => {
-    const { baseUrl, apiKey, model, text, stream, sessionId } = req.body as {
+    const { baseUrl, apiKey, model, text, stream, sessionId, maxTokens } = req.body as {
       baseUrl?: string
       apiKey?: string
       model?: string
       text?: string
       stream?: boolean
       sessionId?: string
+      maxTokens?: number
     }
     // 校验必填字段
     if (!baseUrl || !apiKey || !model || !text || !sessionId) {
@@ -40,7 +41,7 @@ function handleChat(protocol: Protocol) {
       // 日志回调：写文件 + 广播给订阅的 SSE 客户端（带协议用于生成整合摘要）
       const onEvent = (event: LogEvent) => logManager.append(sessionId, event, protocol)
       // 事件序列：流式与非流式消费的是同一条 agent loop（结构化事件，含文本与工具调用）
-      const events = chatWithProtocol(protocol, { baseUrl, apiKey, model, text, conversation, stream: !!stream, onEvent })
+      const events = chatWithProtocol(protocol, { baseUrl, apiKey, model, text, conversation, stream: !!stream, onEvent, maxTokens })
 
       if (!stream) {
         // 非流式：把事件收集完整后一次性返回 { events }（此刻还没写过响应头，

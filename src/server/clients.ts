@@ -22,6 +22,8 @@ export type ChatRequest = {
   conversation: Conversation
   // 是否向上游发起流式请求（决定 requestTurn 走哪条路；对外统一是文本增量序列）
   stream: boolean
+  // 最大生成 tokens（三协议通用；未提供时用 DEFAULT_MAX_TOKENS 兜底）
+  maxTokens?: number
   // 日志事件回调：由调用方绑定到具体会话
   onEvent: (event: LogEvent) => void
 }
@@ -57,6 +59,9 @@ function extractAnthropicText(content: Anthropic.Message['content']): string {
 
 // agent loop 最大轮数：模型 → 工具 → 模型 … 的循环上限，防止无限调用
 const MAX_AGENT_TURNS = 20
+
+// 默认最大生成 tokens（16K）——Anthropic 的 max_tokens 是必填字段，故需兜底值
+const DEFAULT_MAX_TOKENS = 16_384
 
 // 解析模型给出的工具入参（JSON 文本 → 对象），解析失败按空对象处理
 function parseToolArgs(json: string): unknown {
@@ -173,7 +178,7 @@ async function* chatWithAnthropic(req: ChatRequest): AsyncGenerator<ChatEvent> {
   const adapter: ProtocolAdapter<Anthropic.Message> = {
     // 流式用 SDK 的 stream helper：content blocks 由它自己拼，thinking + signature 一并保留
     async *requestTurn(messages) {
-      const params = { model: req.model, max_tokens: 4096, messages: messages as Anthropic.MessageParam[], tools }
+      const params = { model: req.model, max_tokens: req.maxTokens ?? DEFAULT_MAX_TOKENS, messages: messages as Anthropic.MessageParam[], tools }
       if (!req.stream) {
         const res = await client.messages.create(params)
         const text = extractAnthropicText(res.content)
@@ -219,7 +224,7 @@ async function* chatWithOpenAiChat(req: ChatRequest): AsyncGenerator<ChatEvent> 
     // 流式刻意不用 SDK 的 stream helper：finalChatCompletion() 只拼它类型里的字段，
     // reasoning_content 这类厂商扩展会被后一片覆盖、只剩最后一片。这里自己通用合并。
     async *requestTurn(messages) {
-      const params = { model: req.model, messages: messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[], tools }
+      const params = { model: req.model, messages: messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[], tools, ...(req.maxTokens ? { max_tokens: req.maxTokens } : {}) }
       if (!req.stream) {
         const res = await client.chat.completions.create(params)
         const message = res.choices[0]?.message as unknown as Record<string, unknown> | undefined
@@ -277,7 +282,7 @@ async function* chatWithOpenAiResponses(req: ChatRequest): AsyncGenerator<ChatEv
 
   const adapter: ProtocolAdapter<OpenAI.Responses.Response> = {
     async *requestTurn(messages) {
-      const params = { model: req.model, input: messages as OpenAI.Responses.ResponseInput, tools }
+      const params = { model: req.model, input: messages as OpenAI.Responses.ResponseInput, tools, ...(req.maxTokens ? { max_output_tokens: req.maxTokens } : {}) }
       if (!req.stream) {
         const res = await client.responses.create(params)
         if (res.output_text) yield { kind: 'text', delta: res.output_text }

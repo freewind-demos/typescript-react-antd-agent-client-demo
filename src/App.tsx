@@ -2,7 +2,7 @@
 // + 微信式聊天区 + 日志面板（实时原样展示当前会话的所有请求与响应）
 
 import { useEffect, useRef, useState } from 'react'
-import { Button, Card, Flex, Input, Popconfirm, Space, Splitter, Switch, Tabs, Typography, message } from 'antd'
+import { Button, Card, Flex, Input, InputNumber, Popconfirm, Space, Splitter, Switch, Tabs, Typography, message } from 'antd'
 import { PROTOCOLS, type Protocol } from './protocols'
 import { appendChunkText, appendRawEvent, emptyDelta, flushDeltaPending, renderDeltaText, type DeltaState } from './delta'
 import { getProviders, getSelectedProviderId, saveProviders, saveSelectedProviderId, type Provider } from './config'
@@ -10,6 +10,9 @@ import ProviderModal, { type ProviderDraft } from './ProviderModal'
 
 const { TextArea } = Input
 const { Text } = Typography
+
+// 最大生成 tokens 的默认值（16K）
+const DEFAULT_MAX_TOKENS = 16_384
 
 // 一次 Bash 工具调用的展示信息
 type ToolCallInfo = { name: string; input: { command: string; timeout?: number }; output: string; exitCode: number }
@@ -108,6 +111,8 @@ export default function App() {
   const [editingProvider, setEditingProvider] = useState<Provider | null>(null)
   // 全局流式开关（与具体 Provider 无关）
   const [stream, setStream] = useState(true)
+  // 全局最大生成 tokens（与具体 Provider 无关；界面可见、可改）
+  const [maxTokens, setMaxTokens] = useState(DEFAULT_MAX_TOKENS)
   // 当前会话绑定的协议：会话历史是协议原生的报文（见 server/conversation.ts），换协议必须开新会话
   const [sessionProtocol, setSessionProtocol] = useState<Protocol | null>(null)
 
@@ -392,7 +397,7 @@ export default function App() {
       const res = await fetch(meta.chatEndpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ baseUrl: provider.baseUrl, apiKey: provider.apiKey, model: provider.model, text, stream, sessionId: activeSessionId }),
+        body: JSON.stringify({ baseUrl: provider.baseUrl, apiKey: provider.apiKey, model: provider.model, text, stream, sessionId: activeSessionId, maxTokens }),
       })
       if (!res.ok) {
         const data = await res.json().catch(() => null)
@@ -505,10 +510,16 @@ export default function App() {
         {/* ---- 左侧面板：配置区 + 聊天区 ---- */}
         <Splitter.Panel defaultSize="40%" min="25%" max="70%">
           <Flex vertical gap={12} style={{ height: '100%', minWidth: 0, paddingRight: 6 }}>
-        {/* 全局流式开关（与具体 Provider 无关，放在最外层） */}
-        <Flex align="center" gap={8}>
-          <Text>流式</Text>
-          <Switch size="small" checked={stream} onChange={setStream} />
+        {/* 全局开关（与具体 Provider 无关，放在最外层） */}
+        <Flex align="center" gap={16}>
+          <Flex align="center" gap={8}>
+            <Text>流式</Text>
+            <Switch size="small" checked={stream} onChange={setStream} />
+          </Flex>
+          <Flex align="center" gap={8}>
+            <Text>最大 Tokens</Text>
+            <InputNumber size="small" min={1} step={1024} value={maxTokens} onChange={(v) => setMaxTokens(v ?? DEFAULT_MAX_TOKENS)} style={{ width: 110 }} />
+          </Flex>
         </Flex>
 
         {/* Providers：可添加 / 编辑 / 删除 / 选择的接入配置列表 */}
