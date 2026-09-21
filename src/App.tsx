@@ -14,6 +14,10 @@ const { Text } = Typography
 // 一次 Bash 工具调用的展示信息
 type ToolCallInfo = { name: string; input: { command: string; timeout?: number }; output: string; exitCode: number }
 
+// 一条来自 chat 响应的结构化事件（与 Server 的 ChatEvent 对齐）：
+// text = 文本增量；tool = 一次工具调用（含本地执行结果）
+type ChatEvent = { type: 'text'; delta: string } | { type: 'tool'; name: string; input: { command: string; timeout?: number }; output: string; exitCode: number }
+
 // 聊天消息结构：角色 + 内容；tool 类型用于展示工具调用（content 为空，细节在 toolInfo）
 // toolPhase 区分两条独立气泡：call = 模型发起的命令，result = 命令的执行结果
 // error：Chat 过程中（请求 / 流式）失败时插入的错误条目，按时间顺序排在聊天流里（不再用 Toast）
@@ -258,8 +262,8 @@ export default function App() {
           setSessionJson(patch)
           setCurrentPair((prev) => (prev ? { ...prev, response: { status: data.status, statusText: data.statusText, headers: data.headers ?? {}, body: prev.response?.body ?? null } } : prev))
         }
-        // 工具调用：挂到当前交互记录，并在聊天区按真实时序切分/插入工具气泡
-        //（preamble 留在工具之前，工具之后新起一个助手气泡接续后续回答）
+        // 工具调用：只挂到日志面板的交互记录上（聊天区气泡由 chat 响应的事件流驱动，
+        // 见 applyChatEvent —— 日志 SSE 只服务右侧日志面板，不再影响聊天区）
         if (data.type === 'tool') {
           const toolCall: ToolCallInfo = { name: data.name, input: data.input, output: data.output, exitCode: data.exitCode }
           const patchTools = (prev: InteractionRecord[]) => {
@@ -271,33 +275,6 @@ export default function App() {
           }
           setSessionJson(patchTools)
           setCurrentPair((prev) => (prev ? { ...prev, tools: [...(prev.tools ?? []), toolCall] } : prev))
-          // 在工具调用点按真实时序切分助手气泡：
-          // 模型调用工具前会先输出一段解释（preamble，已随流式追加进当前助手气泡），
-          // 它在时序上位于工具调用之前；工具调用之后的文字（含最终回答）属于新的助手气泡。
-          // 因此保留已有 preamble 气泡在工具之前，工具之后追加一个新的空助手气泡，
-          // 拆成两条独立工具气泡（先 tool call 命令，再 tool result 结果），
-          // 形成正确时序：user → 解释 → tool call → tool result → 最终回答
-          setMessages((prev) => {
-            const next = [...prev]
-            const toolMessages: ChatMessage[] = [
-              { role: 'tool', toolPhase: 'call', content: '', toolInfo: toolCall },
-              { role: 'tool', toolPhase: 'result', content: '', toolInfo: toolCall },
-            ]
-            const newAssistant: ChatMessage = { role: 'assistant', content: '' }
-            const lastIndex = next.length - 1
-            const last = lastIndex >= 0 ? next[lastIndex] : undefined
-            if (last?.role === 'assistant' && last.content !== '') {
-              // 本轮有 preamble：保留其独立气泡（位于工具之前），其后插入工具 + 新空助手气泡
-              next.splice(lastIndex + 1, 0, ...toolMessages, newAssistant)
-            } else if (last?.role === 'assistant') {
-              // 空助手占位（本轮无 preamble）：原地替换为 工具 + 新空助手气泡
-              next.splice(lastIndex, 1, ...toolMessages, newAssistant)
-            } else {
-              // 兜底：尾部不是助手气泡时直接追加
-              next.push(...toolMessages, newAssistant)
-            }
-            return next
-          })
         }
         // 聚合后的完整响应正文：更新最后一条交互的 response.body
         if (data.currentResponse !== undefined && data.currentResponse !== null) {
@@ -342,6 +319,48 @@ export default function App() {
     if (el) el.scrollTop = el.scrollHeight
   }, [sessionJson])
 
+  // 消费一条 chat 事件，按真实时序构建聊天区气泡：
+  //   text → 续写到当前助手气泡（没有则新起）
+  //   tool → 在此处插入「tool call + tool result」两段气泡，并新起一个助手气泡接续后续文本
+  // 流式（逐条到达）与非流式（一次性回放 events）共用这一个函数。
+  const applyChatEvent = (ev: ChatEvent) => {
+    if (ev.type === 'text') {
+      setMessages((prev) => {
+        const next = [...prev]
+        const last = next[next.length - 1]
+        if (last && last.role === 'assistant') {
+          next[next.length - 1] = { role: 'assistant', content: last.content + ev.delta }
+        } else {
+          next.push({ role: 'assistant', content: ev.delta })
+        }
+        return next
+      })
+      return
+    }
+    const toolCall: ToolCallInfo = { name: ev.name, input: ev.input, output: ev.output, exitCode: ev.exitCode }
+    setMessages((prev) => {
+      const next = [...prev]
+      const toolMessages: ChatMessage[] = [
+        { role: 'tool', toolPhase: 'call', content: '', toolInfo: toolCall },
+        { role: 'tool', toolPhase: 'result', content: '', toolInfo: toolCall },
+      ]
+      const newAssistant: ChatMessage = { role: 'assistant', content: '' }
+      const lastIndex = next.length - 1
+      const last = lastIndex >= 0 ? next[lastIndex] : undefined
+      if (last?.role === 'assistant' && last.content !== '') {
+        // 本轮有 preamble：保留其独立气泡（位于工具之前），其后插入工具 + 新空助手气泡
+        next.splice(lastIndex + 1, 0, ...toolMessages, newAssistant)
+      } else if (last?.role === 'assistant') {
+        // 空助手占位（本轮无 preamble）：原地替换为 工具 + 新空助手气泡
+        next.splice(lastIndex, 1, ...toolMessages, newAssistant)
+      } else {
+        // 兜底：尾部不是助手气泡时直接追加
+        next.push(...toolMessages, newAssistant)
+      }
+      return next
+    })
+  }
+
   // 发送消息：流式 / 非流式两条路径
   const handleSend = async () => {
     const text = input.trim()
@@ -380,20 +399,11 @@ export default function App() {
         throw new Error(data?.error || `HTTP ${res.status}`)
       }
 
-      // 更新最后一条助手消息的内容
-      const appendAssistant = (delta: string) => {
-        setMessages((prev) => {
-          const next = [...prev]
-          const last = next[next.length - 1]
-          next[next.length - 1] = { role: 'assistant', content: last.content + delta }
-          return next
-        })
-      }
-
       if (!stream) {
-        // 非流式：一次性拿到完整文本
+        // 非流式：一次性拿到完整事件序列，按顺序回放成气泡
         const data = await res.json()
-        appendAssistant(data.text ?? '')
+        const events: ChatEvent[] = Array.isArray(data.events) ? data.events : []
+        for (const ev of events) applyChatEvent(ev)
         return
       }
 
@@ -417,8 +427,8 @@ export default function App() {
             if (data === '[DONE]') continue
             try {
               const parsed = JSON.parse(data)
-              if (typeof parsed.delta === 'string') {
-                appendAssistant(parsed.delta)
+              if (parsed.type === 'text' || parsed.type === 'tool') {
+                applyChatEvent(parsed)
               } else if (typeof parsed.error === 'string') {
                 streamError = parsed.error
               }

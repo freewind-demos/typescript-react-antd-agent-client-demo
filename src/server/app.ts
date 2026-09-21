@@ -5,7 +5,7 @@
 // 两种方式路由完全一致（都带 /api 前缀）。
 
 import express from 'express'
-import { chatWithProtocol, listModelsWithFallback, type ChatRequest, type Protocol } from './clients.js'
+import { chatWithProtocol, listModelsWithFallback, type ChatEvent, type ChatRequest, type Protocol } from './clients.js'
 import { LogManager } from './logger.js'
 import { ConversationStore } from './conversation.js'
 import type { LogEvent } from './middleware.js'
@@ -39,25 +39,25 @@ function handleChat(protocol: Protocol) {
     try {
       // 日志回调：写文件 + 广播给订阅的 SSE 客户端（带协议用于生成整合摘要）
       const onEvent = (event: LogEvent) => logManager.append(sessionId, event, protocol)
-      // 文本增量序列：流式与非流式消费的是同一条 agent loop
-      const deltas = chatWithProtocol(protocol, { baseUrl, apiKey, model, text, conversation, stream: !!stream, onEvent })
+      // 事件序列：流式与非流式消费的是同一条 agent loop（结构化事件，含文本与工具调用）
+      const events = chatWithProtocol(protocol, { baseUrl, apiKey, model, text, conversation, stream: !!stream, onEvent })
 
       if (!stream) {
-        // 非流式：把增量跑干拼成完整文本，一次性返回（此刻还没写过响应头，
+        // 非流式：把事件收集完整后一次性返回 { events }（此刻还没写过响应头，
         // 所以中途出错仍能走下面的 500 分支）
-        let result = ''
-        for await (const delta of deltas) result += delta
-        res.json({ text: result })
+        const collected: ChatEvent[] = []
+        for await (const event of events) collected.push(event)
+        res.json({ events: collected })
         return
       }
 
-      // 流式：以 SSE 形式把文本增量转发给前端，每个增量一条 data
+      // 流式：以 SSE 形式把每个事件原样转发给前端（text / tool），前端据此建气泡
       streaming = true
       res.setHeader('content-type', 'text/event-stream')
       res.setHeader('cache-control', 'no-cache')
       res.setHeader('connection', 'keep-alive')
-      for await (const delta of deltas) {
-        res.write(`data: ${JSON.stringify({ delta })}\n\n`)
+      for await (const event of events) {
+        res.write(`data: ${JSON.stringify(event)}\n\n`)
       }
       res.write('data: [DONE]\n\n')
       res.end()

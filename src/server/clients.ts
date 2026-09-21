@@ -69,9 +69,10 @@ function parseToolArgs(json: string): unknown {
 }
 
 // 按 Bash 工具约定执行命令：command 缺失/非法时直接返回错误结果，不真正执行。
-// 无论成功与否都触发一条 tool 事件（用于日志面板与前端工具气泡）。
-async function runBashTool(input: unknown, onEvent: (event: LogEvent) => void): Promise<BashResult> {
+// 无论成功与否都触发一条 tool 事件（用于日志面板）；规范化后的入参随返回值交给聊天事件。
+async function runBashTool(input: unknown, onEvent: (event: LogEvent) => void): Promise<{ input: ToolInput; result: BashResult }> {
   const { command, timeout } = (input ?? {}) as { command?: unknown; timeout?: unknown }
+  const normalized: ToolInput = { command: typeof command === 'string' ? command : String(command ?? ''), ...(typeof timeout === 'number' ? { timeout } : {}) }
   const validCommand = typeof command === 'string' && command.trim() !== ''
   const result: BashResult = validCommand
     ? await executeBash({ command: command as string, timeout: typeof timeout === 'number' ? timeout : undefined })
@@ -79,15 +80,25 @@ async function runBashTool(input: unknown, onEvent: (event: LogEvent) => void): 
   onEvent({
     type: 'tool',
     name: BASH_TOOL_NAME,
-    input: { command: typeof command === 'string' ? command : String(command ?? ''), ...(typeof timeout === 'number' ? { timeout } : {}) },
+    input: normalized,
     output: result.output,
     exitCode: result.exitCode,
     timestamp: Date.now(),
   })
-  return result
+  return { input: normalized, result }
 }
 
 // ---- 协议适配器：三协议各自实现这几个函数，其余全部共用 ----
+
+// Bash 工具入参（规范化后）：命令 + 可选超时
+export type ToolInput = { command: string; timeout?: number }
+
+// 一条发给前端的聊天事件：文本增量，或一次工具调用（含本地执行结果）。
+// 顺序即真实时序 —— 前端据此在正确位置续写助手气泡 / 插入工具气泡。
+// 它不是日志：只描述这次 chat 交互；右侧日志面板另有通道（日志 SSE），两者互不依赖。
+export type ChatEvent =
+  | { type: 'text'; delta: string }
+  | { type: 'tool'; name: string; input: ToolInput; output: string; exitCode: number }
 
 // 本轮要执行的一个工具调用。key 用于把执行结果对回原调用（各协议的字段名不同）
 type ToolCall = { key: string; input: unknown }
@@ -111,9 +122,13 @@ type ProtocolAdapter<T> = {
 
 // 唯一的 agent loop（三协议共用）。
 //
+// 产出结构化事件流（ChatEvent）：文本增量按发生顺序、工具调用的入参与结果就地插在中间。
+// 前端直接消费这条流即可还原「user → 解释 → tool call → tool result → 回答」的真实时序，
+// 不需要借助日志 SSE（日志只服务右侧日志面板）。
+//
 // 历史改动全程发生在副本上（copy-on-write）：上游报错、工具执行抛错、轮数超限时整轮丢弃，
 // 绝不把半截历史（有 user 没 assistant、有 tool_calls 没 tool 结果）留在会话里。
-async function* agentLoop<T>(req: ChatRequest, adapter: ProtocolAdapter<T>): AsyncGenerator<string> {
+async function* agentLoop<T>(req: ChatRequest, adapter: ProtocolAdapter<T>): AsyncGenerator<ChatEvent> {
   const working: unknown[] = [...req.conversation.messages]
   working.push({ role: 'user', content: req.text })
 
@@ -122,7 +137,7 @@ async function* agentLoop<T>(req: ChatRequest, adapter: ProtocolAdapter<T>): Asy
     for await (const event of adapter.requestTurn(working)) {
       if (event.kind === 'text') {
         // 文本增量：立即往下透传（打字机效果）
-        yield event.delta
+        yield { type: 'text', delta: event.delta }
       } else {
         res = event.res
       }
@@ -138,7 +153,9 @@ async function* agentLoop<T>(req: ChatRequest, adapter: ProtocolAdapter<T>): Asy
     // 按模型给出的顺序逐个执行（不并行），结果与调用一一对应
     const results: ToolResult[] = []
     for (const tool of tools) {
-      const result = await runBashTool(tool.input, req.onEvent)
+      const { input, result } = await runBashTool(tool.input, req.onEvent)
+      // 工具事件就地插进事件流：前端在正确位置渲染工具气泡，并另起助手气泡接续后续文本
+      yield { type: 'tool', name: BASH_TOOL_NAME, input, output: result.output, exitCode: result.exitCode }
       results.push({ key: tool.key, output: formatBashResult(result) })
     }
     adapter.commitTurn(working, res, results)
@@ -148,7 +165,7 @@ async function* agentLoop<T>(req: ChatRequest, adapter: ProtocolAdapter<T>): Asy
 
 // ---- Anthropic Messages 协议 ----
 
-async function* chatWithAnthropic(req: ChatRequest): AsyncGenerator<string> {
+async function* chatWithAnthropic(req: ChatRequest): AsyncGenerator<ChatEvent> {
   const client = createClient('anthropic-messages', req.baseUrl, req.apiKey, req.onEvent) as Anthropic
   // 只暴露 Bash 这一个工具
   const tools: Anthropic.Tool[] = [BASH_TOOL_ANTHROPIC]
@@ -193,7 +210,7 @@ async function* chatWithAnthropic(req: ChatRequest): AsyncGenerator<string> {
 
 // ---- OpenAI Chat Completions 协议 ----
 
-async function* chatWithOpenAiChat(req: ChatRequest): AsyncGenerator<string> {
+async function* chatWithOpenAiChat(req: ChatRequest): AsyncGenerator<ChatEvent> {
   const client = createClient('openai-chat-completions', req.baseUrl, req.apiKey, req.onEvent) as OpenAI
   // 只暴露 Bash 这一个工具
   const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [BASH_TOOL_CHAT]
@@ -253,7 +270,7 @@ async function* chatWithOpenAiChat(req: ChatRequest): AsyncGenerator<string> {
 
 // ---- OpenAI Responses 协议 ----
 
-async function* chatWithOpenAiResponses(req: ChatRequest): AsyncGenerator<string> {
+async function* chatWithOpenAiResponses(req: ChatRequest): AsyncGenerator<ChatEvent> {
   const client = createClient('openai-responses', req.baseUrl, req.apiKey, req.onEvent) as OpenAI
   // 只暴露 Bash 这一个工具（Responses 的工具声明是扁平结构）
   const tools: OpenAI.Responses.Tool[] = [BASH_TOOL_RESPONSES]
@@ -304,10 +321,10 @@ async function* chatWithOpenAiResponses(req: ChatRequest): AsyncGenerator<string
   yield* agentLoop(req, adapter)
 }
 
-// 统一聊天入口：按协议分发。返回文本增量序列 ——
-// 流式就直接转发给前端；非流式把这条序列跑干拼成完整文本再一次性返回（上游仍是非流式请求）。
+// 统一聊天入口：按协议分发。返回结构化事件序列（ChatEvent）——
+// 流式就逐条转发给前端；非流式把整条序列收集后一次性返回（上游仍是非流式请求）。
 // 生成器是惰性的：调用它不发起任何请求，首次迭代才开始。
-export function chatWithProtocol(protocol: Protocol, req: ChatRequest): AsyncGenerator<string> {
+export function chatWithProtocol(protocol: Protocol, req: ChatRequest): AsyncGenerator<ChatEvent> {
   switch (protocol) {
     case 'anthropic-messages':
       return chatWithAnthropic(req)
