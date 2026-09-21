@@ -113,7 +113,8 @@ type ProtocolAdapter<T> = {
   requestTurn(messages: unknown[]): AsyncGenerator<TurnEvent<T>>
   // 本轮响应里要执行的工具调用（保持模型给出的顺序）
   extractTools(res: T): ToolCall[]
-  // 把本轮响应与工具结果按协议原生形态写回历史（Responses 要求 function_call 与结果成对相邻）
+  // 把本轮响应（以及工具结果，如果有）按协议原生形态写回历史（Responses 要求 function_call 与结果成对相邻）。
+  // results 为空表示这是本轮 Agent 循环的最终响应：此时只写 assistant 消息。
   commitTurn(messages: unknown[], res: T, results: ToolResult[]): void
 }
 
@@ -147,7 +148,10 @@ async function* agentLoop<T>(req: ChatRequest, adapter: ProtocolAdapter<T>): Asy
 
     const tools = adapter.extractTools(res)
     if (tools.length === 0) {
-      // 拿到最终回答：到这一刻才把整轮历史提交回会话
+      // 拿到最终回答：到这一刻才把整轮历史提交回会话。
+      // 最终响应同样必须按协议原生格式写回历史（工具结果为空 → 只写 assistant 消息），
+      // 否则多轮对话里模型看不到自己上一轮的回答。
+      adapter.commitTurn(working, res, [])
       req.conversation.messages = working
       return
     }
@@ -199,6 +203,8 @@ async function* chatWithAnthropic(req: ChatRequest): AsyncGenerator<ChatEvent> {
     // 工具结果合并成一条 user 消息（Anthropic 的 tool_result 就是 user 侧内容）
     commitTurn(messages, res, results) {
       messages.push({ role: 'assistant', content: res.content as Anthropic.ContentBlockParam[] })
+      // 最终响应（无工具结果）只写 assistant 消息：空的 tool_result 数组是非法内容
+      if (results.length === 0) return
       messages.push({
         role: 'user',
         content: results.map((r) => ({ type: 'tool_result', tool_use_id: r.key, content: r.output })),
@@ -257,7 +263,7 @@ async function* chatWithOpenAiChat(req: ChatRequest): AsyncGenerator<ChatEvent> 
         .map((call) => ({ key: call.id as string, input: parseToolArgs((call.function as { arguments?: string } | undefined)?.arguments ?? '') }))
     },
     // 原样放回：上游返回的 assistant message 整份追加（含 reasoning_content 等 SDK 类型外的字段），
-    // 每个工具结果以 role:'tool' 消息按模型给出的顺序回传
+    // 每个工具结果以 role:'tool' 消息按模型给出的顺序回传（无工具结果时只追加 assistant message）
     commitTurn(messages, res, results) {
       messages.push(res as ChatCompletionAssistantMessage)
       for (const r of results) {
@@ -302,6 +308,7 @@ async function* chatWithOpenAiResponses(req: ChatRequest): AsyncGenerator<ChatEv
     },
     // 本轮 output 按原顺序整体放回，并在每个 function_call 之后紧跟它的 function_call_output
     //（并行工具调用时也必须成对，不能先放全部 call 再放全部 output）
+    // 无工具结果（最终响应）时 output 里没有 function_call 条目，这里只把 output 整份放回
     commitTurn(messages, res, results) {
       const byKey = new Map(results.map((r) => [r.key, r.output]))
       const output = res.output as unknown as OpenAI.Responses.ResponseOutputItem[]
