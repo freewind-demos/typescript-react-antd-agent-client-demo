@@ -47,6 +47,8 @@ pnpm run dev
 - **必须走本地 Server，不能浏览器直连**。Anthropic API 对浏览器跨域直连有 CORS 限制，本 Demo 的所有请求都由 Node Server 里的 SDK 发出，前端只与本地 Server 通信。
 - 非流式模式下，响应体（JSON）也会作为一条 CHUNK 日志展示——它同样是你"收到的原始内容"。
 - 换协议时模型列表不会自动复用，需要重新 Fetch Models。
+- **会话历史保存在本地 Server 的内存里**（按 sessionId）。Server 重启后内存里的历史清空，需要开新会话重新聊；日志文件不受影响。
+- **换 Provider 协议会自动开新会话**（Completions / Responses / Anthropic 之间互切）。因为历史是协议原生的报文，跨协议复用会把上一种协议的结构发进新协议。
 - 日志文件按会话隔离：点"新会话"会生成新的 sessionId 和新的日志文件，同一会话内多轮聊天累积在同一文件里。
 
 ## 教程
@@ -74,11 +76,11 @@ pnpm run dev
 
 ### 三种协议
 
-| 协议 | Server Endpoint | SDK 调用 | 流式事件 |
+| 协议 | Server Endpoint | 非流式 / 流式 的 SDK 调用 | 流式事件 |
 | --- | --- | --- | --- |
-| Anthropic Messages | `/api/anthropic/messages` | `client.messages.create()` | `content_block_delta` 事件里 `delta.type === 'text_delta'` 的 `delta.text` |
-| OpenAI Chat Completions | `/api/openai/chat-completions` | `client.chat.completions.create()` | 每个 chunk 的 `choices[0].delta.content` |
-| OpenAI Responses | `/api/openai/responses` | `client.responses.create()` | `response.output_text.delta` 事件的 `delta` 字段 |
+| Anthropic Messages | `/api/anthropic/messages` | `client.messages.create()` / `client.messages.stream()` + `await finalMessage()` | `content_block_delta` 事件里 `delta.type === 'text_delta'` 的 `delta.text` |
+| OpenAI Chat Completions | `/api/openai/chat-completions` | `client.chat.completions.create()`（流式同样用 `create({ stream: true })`，刻意不用 `.stream()` helper，原因见下文「会话状态与历史回放」） | 每个 chunk 的 `choices[0].delta.content` |
+| OpenAI Responses | `/api/openai/responses` | `client.responses.create()` / `client.responses.stream()` + `await finalResponse()` | `response.output_text.delta` 事件的 `delta` 字段 |
 
 模型列表获取同理：`/api/anthropic/models`、`/api/openai/chat-completions/models`、`/api/openai/responses/models` 分别调用对应 SDK 的 `models.list()`。
 
@@ -97,6 +99,26 @@ Demo 只给模型提供**一个**工具 `Bash`（`command` 必填，`timeout` �
 **Agent 循环**：三种协议的 chat 函数（`src/server/clients.ts`）内部都跑同一个循环——请求模型 → 若模型要调用工具就执行 Bash 并把结果回传 → 再请求模型，直到模型不再调用工具（最多 20 轮）。非流式在循环跑完后一次性返回最终文本；流式则边收边把文本增量推给前端，遇到工具调用时先执行、再进入下一轮。
 
 **展示**：每次工具执行都会触发一条 `tool` 日志事件（入参、输出、退出码），既写进 verbose 日志、挂到日志面板"会话"Tab 对应那一条请求上，也通过 SSE 送到前端，在聊天区渲染成一个"工具气泡"。
+
+### 会话状态与历史回放（关键）
+
+Client 的原则是 **「历史只追加、不重建；收到什么就回放什么」**。上游是无状态的，它每次只收到一份完整的消息数组，所以「记忆」只能由本地这侧保管。
+
+**历史存在哪儿**：`src/server/conversation.ts` 的 `ConversationStore`，按 `sessionId` 存一份**协议原生消息序列**。前端只发本轮输入（`{ baseUrl, apiKey, model, text, stream, sessionId }`），不再自己拼历史——否则前端就得懂三种协议的报文结构；而且把聊天记录「压平成纯文本」等于把 `tool_calls`、`reasoning_content`、Anthropic 的 content block 统统改写掉。
+
+**怎么回放**：每轮把上游返回的消息**原样**追加进序列，构造下一轮请求时整份发出。
+
+- **Chat Completions 非流式**：直接把上游 `message` 对象 push 回 `messages`（字段一个不挑）
+- **Chat Completions 流式**：把 delta 里**出现过的所有键**通用合并成一条 message（字符串拼接、`tool_calls` 按 `index` 归并、其余非空值覆盖）。**这里刻意不用 SDK 的 `finalChatCompletion()`**——它只拼自己类型里的字段，不认识的字段（如 DeepSeek 的 `reasoning_content`）会被后一片直接覆盖，只剩最后一片，而且静默不报错
+- **Anthropic**：用 `client.messages.stream()` 的 `finalMessage()` 拿完整消息，原始 content blocks 整份放回（含 `thinking` + `signature`，以及白名单外的未知块）
+- **Responses**：用 `responses.stream()` 的 `finalResponse()`，把本轮 `output` 条目**按原顺序**整体放回 `input`，并在每个 `function_call` 之后紧跟它的 `function_call_output`
+- **工具结果**：按模型给出的顺序、成对回传，不要按「命令跑完的先后」排
+
+**为什么 `reasoning_content` 这类字段要专门照顾**：它不是 OpenAI 官方 Chat Completions 协议的东西，是上游（DeepSeek 系）自己加的扩展，SDK 类型里没有。类型层用交叉类型 `& Record<string, unknown>` 放开，运行时 SDK 不会剥掉它不认识的字段。另外 **DeepSeek 官方要求工具调用轮必须把 `reasoning_content` 传回去**（不带直接 400：`The reasoning_content in the thinking mode must be passed back to the API.`；实测带 `""` 空串也能过）。
+
+**换协议**：会话历史是协议原生的，不能跨协议复用。前端记住会话绑定的协议，换 Provider 协议时自动开新会话；服务端 `ConversationStore` 也有同样保护（协议不一致时视为新会话）。
+
+**已知限制**：会话只存在服务端内存里，服务重启即清空（`logs/` 下的日志文件仍在）。
 
 ### 日志中间件原理（核心）
 
@@ -123,6 +145,7 @@ Demo 只给模型提供**一个**工具 `Bash`（`command` 必填，`timeout` �
 
 - `src/server/middleware.ts` — 日志中间件（包装 fetch、tee 分流、逐 chunk 记录）
 - `src/server/logger.ts` — 日志写文件 + SSE 广播
+- `src/server/conversation.ts` — 会话状态：按 sessionId 持有协议原生消息序列（历史只追加不重建）
 - `src/server/tools.ts` — Bash 工具的三协议声明与本地命令执行器
 - `src/server/clients.ts` — 三种协议的 SDK 封装、Agent 工具循环与文本提取
 - `src/server/app.ts` — express 应用（聊天/模型/日志接口），dev 时作为 Vite 中间件挂载
