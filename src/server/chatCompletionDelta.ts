@@ -24,13 +24,18 @@ export function mergeChatCompletionDelta(message: Record<string, unknown>, delta
   }
 }
 
-// 工具调用分片按 index 归并：id / type 等取非空值，function.arguments 是分片 JSON 需要拼接
+// 工具调用分片按 index 归并：id / type 等取非空值，function.arguments 是分片 JSON 需要拼接。
+// index 只用于流式分片的定位（哪一片属于第几个 tool call），它不属于完整 assistant 消息的
+// tool_calls 字段：这里只当内部下标用，绝不写进最终结果（否则回放时严格的上游会报
+// Unknown parameter: tool_calls[0].index）。
 export function mergeToolCallPieces(message: Record<string, unknown>, pieces: Array<Record<string, unknown>>): void {
   const toolCalls = (message.tool_calls as Array<Record<string, unknown>> | undefined) ?? (message.tool_calls = [])
   for (const piece of pieces) {
     const index = typeof piece.index === 'number' ? piece.index : 0
-    const slot = toolCalls[index] ?? (toolCalls[index] = { index })
+    const slot = toolCalls[index] ?? (toolCalls[index] = {})
     for (const [key, value] of Object.entries(piece)) {
+      // index 是流式定位字段，不写进最终消息
+      if (key === 'index') continue
       if (value == null || value === '') continue
       if (key === 'function' && typeof value === 'object') {
         const fn = (slot.function as Record<string, unknown> | undefined) ?? (slot.function = {})

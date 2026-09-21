@@ -110,7 +110,7 @@ Client 的原则是 **「历史只追加、不重建；收到什么就回放什�
 **怎么回放**：每轮把上游返回的消息**原样**追加进序列，构造下一轮请求时整份发出。
 
 - **Chat Completions 非流式**：直接把上游 `message` 对象 push 回 `messages`（字段一个不挑）
-- **Chat Completions 流式**：把 delta 里**出现过的所有键**通用合并成一条 message（字符串拼接、`tool_calls` 按 `index` 归并、其余非空值覆盖）。**这里刻意不用 SDK 的 `finalChatCompletion()`**——它只拼自己类型里的字段，不认识的字段（如 DeepSeek 的 `reasoning_content`）会被后一片直接覆盖，只剩最后一片，而且静默不报错
+- **Chat Completions 流式**：把 delta 里**出现过的所有键**通用合并成一条 message（字符串拼接、`tool_calls` 按 `index` 归并、其余非空值覆盖）。`index` 只用于归并定位、**不写进回放的历史**（它不属于 assistant 消息字段，严格的上游会报 `Unknown parameter: tool_calls[0].index`）。**这里刻意不用 SDK 的 `finalChatCompletion()`**——它只拼自己类型里的字段，不认识的字段（如 DeepSeek 的 `reasoning_content`）会被后一片直接覆盖，只剩最后一片，而且静默不报错
 - **Anthropic**：用 `client.messages.stream()` 的 `finalMessage()` 拿完整消息，原始 content blocks 整份放回（含 `thinking` + `signature`，以及白名单外的未知块）
 - **Responses**：用 `responses.stream()` 的 `finalResponse()`，把本轮 `output` 条目**按原顺序**整体放回 `input`，并在每个 `function_call` 之后紧跟它的 `function_call_output`
 - **工具结果**：按模型给出的顺序、成对回传，不要按「命令跑完的先后」排
