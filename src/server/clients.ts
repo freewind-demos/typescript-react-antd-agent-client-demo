@@ -4,6 +4,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
 import { createLoggingFetch, type LogEvent } from './middleware.js'
+import type { Conversation } from './conversation.js'
 import { BASH_TOOL_ANTHROPIC, BASH_TOOL_CHAT, BASH_TOOL_RESPONSES, BASH_TOOL_NAME, executeBash, formatBashResult, type BashResult } from './tools.js'
 
 // 支持的三种协议标识（书写顺序与 protocols.ts 一致：OpenAI 在前，Anthropic 最后）
@@ -14,7 +15,10 @@ export type ChatRequest = {
   baseUrl: string
   apiKey: string
   model: string
-  messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>
+  // 本轮用户输入
+  text: string
+  // 会话历史：协议原生消息序列，由服务端按 sessionId 持有（见 conversation.ts），只追加不重建
+  conversation: Conversation
   stream: boolean
   // 日志事件回调：由调用方绑定到具体会话
   onEvent: (event: LogEvent) => void
@@ -133,12 +137,9 @@ async function chatWithAnthropic(req: ChatRequest): Promise<ChatResult> {
   const client = createClient('anthropic-messages', req.baseUrl, req.apiKey, req.onEvent) as Anthropic
   // 只暴露 Bash 这一个工具
   const tools: Anthropic.Tool[] = [BASH_TOOL_ANTHROPIC]
-  // Anthropic 的 system prompt 是独立字段，不在 messages 数组里，需要拆出来
-  const system = req.messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n')
-  // 会话历史：协议原生消息序列，只追加不重建
-  const conversation: Anthropic.MessageParam[] = req.messages
-    .filter((m) => m.role !== 'system')
-    .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+  // 会话历史：服务端按 sessionId 持有的协议原生消息序列，只追加不重建
+  const conversation = req.conversation.messages as Anthropic.MessageParam[]
+  conversation.push({ role: 'user', content: req.text })
 
   // 非流式：内部跑完整 agent loop，只在最后一轮（无工具调用）返回文本
   if (!req.stream) {
@@ -146,7 +147,7 @@ async function chatWithAnthropic(req: ChatRequest): Promise<ChatResult> {
     // 保持与流式路径一致（流式会把 preamble 直接推给前端）
     let preamble = ''
     for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
-      const res = await client.messages.create({ model: req.model, max_tokens: 4096, system: system || undefined, messages: conversation, tools })
+      const res = await client.messages.create({ model: req.model, max_tokens: 4096, messages: conversation, tools })
       const toolUses = res.content.filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use')
       // 本轮没有工具调用：即为最终回答
       if (toolUses.length === 0) {
@@ -173,7 +174,7 @@ async function chatWithAnthropic(req: ChatRequest): Promise<ChatResult> {
       for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
         // 用 SDK 的 stream helper：既能边收边拿文本增量，又能从 finalMessage() 拿到完整消息
         //（content blocks 由 SDK 自己拼，thinking + signature 一并保留）
-        const stream = client.messages.stream({ model: req.model, max_tokens: 4096, system: system || undefined, messages: conversation, tools })
+        const stream = client.messages.stream({ model: req.model, max_tokens: 4096, messages: conversation, tools })
         for await (const event of stream) {
           if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
             // 文本增量：立即 yield 给前端（打字机效果）
@@ -203,8 +204,9 @@ async function chatWithOpenAiChat(req: ChatRequest): Promise<ChatResult> {
   const client = createClient('openai-chat-completions', req.baseUrl, req.apiKey, req.onEvent) as OpenAI
   // 只暴露 Bash 这一个工具
   const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [BASH_TOOL_CHAT]
-  // 会话历史：协议原生消息序列，只追加不重建
-  const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = req.messages.map((m) => ({ role: m.role, content: m.content }))
+  // 会话历史：服务端按 sessionId 持有的协议原生消息序列，只追加不重建
+  const messages = req.conversation.messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[]
+  messages.push({ role: 'user', content: req.text })
 
   // 非流式：内部跑完整 agent loop，只在最后一轮（无工具调用）返回文本
   if (!req.stream) {
@@ -272,8 +274,9 @@ async function chatWithOpenAiResponses(req: ChatRequest): Promise<ChatResult> {
   const client = createClient('openai-responses', req.baseUrl, req.apiKey, req.onEvent) as OpenAI
   // 只暴露 Bash 这一个工具（Responses 的工具声明是扁平结构）
   const tools: OpenAI.Responses.Tool[] = [BASH_TOOL_RESPONSES]
-  // 会话历史：协议原生 input 序列，只追加不重建
-  const input: OpenAI.Responses.ResponseInput = req.messages.map((m) => ({ role: m.role, content: m.content }))
+  // 会话历史：服务端按 sessionId 持有的协议原生 input 序列，只追加不重建
+  const input = req.conversation.messages as OpenAI.Responses.ResponseInput
+  input.push({ role: 'user', content: req.text })
 
   // 把本轮 output 原样按顺序放回 input，并在每个 function_call 之后紧跟它的 function_call_output
   //（保持模型给出的顺序；并行工具调用时也必须成对，不能先放全部 call 再放全部 output）

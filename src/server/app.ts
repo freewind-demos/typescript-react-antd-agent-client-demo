@@ -7,33 +7,39 @@
 import express from 'express'
 import { chatWithProtocol, listModelsWithFallback, type ChatRequest, type ChatResult, type Protocol } from './clients.js'
 import { LogManager } from './logger.js'
+import { ConversationStore } from './conversation.js'
 import type { LogEvent } from './middleware.js'
 
 // 全局日志管理器：所有会话的日志文件与 SSE 订阅都在这里
 const logManager = new LogManager()
 
+// 全局会话状态：每个 sessionId 一份协议原生消息序列（历史只追加不重建）
+const conversationStore = new ConversationStore()
+
 // 通用聊天 handler：按协议分发，日志事件绑定到请求里的 sessionId
 function handleChat(protocol: Protocol) {
   return async (req: express.Request, res: express.Response) => {
-    const { baseUrl, apiKey, model, messages, stream, sessionId } = req.body as {
+    const { baseUrl, apiKey, model, text, stream, sessionId } = req.body as {
       baseUrl?: string
       apiKey?: string
       model?: string
-      messages?: ChatRequest['messages']
+      text?: string
       stream?: boolean
       sessionId?: string
     }
     // 校验必填字段
-    if (!baseUrl || !apiKey || !model || !messages || !sessionId) {
-      res.status(400).json({ error: 'missing required fields: baseUrl/apiKey/model/messages/sessionId' })
+    if (!baseUrl || !apiKey || !model || !text || !sessionId) {
+      res.status(400).json({ error: 'missing required fields: baseUrl/apiKey/model/text/sessionId' })
       return
     }
+    // 会话历史由服务端持有：拿到（或新建）这个 sessionId 对应的协议原生消息序列
+    const conversation = conversationStore.get(sessionId, protocol)
     // 是否已进入流式响应：一旦进入就按 SSE 收尾（不能再用 res.status(...).json(...)）
     let streaming = false
     try {
       // 日志回调：写文件 + 广播给订阅的 SSE 客户端（带协议用于生成整合摘要）
       const onEvent = (event: LogEvent) => logManager.append(sessionId, event, protocol)
-      const result: ChatResult = await chatWithProtocol(protocol, { baseUrl, apiKey, model, messages, stream: !!stream, onEvent })
+      const result: ChatResult = await chatWithProtocol(protocol, { baseUrl, apiKey, model, text, conversation, stream: !!stream, onEvent })
 
       if (!result.stream) {
         // 非流式：直接返回完整文本
