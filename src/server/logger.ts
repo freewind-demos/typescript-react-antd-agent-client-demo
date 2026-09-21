@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import type { LogEvent } from './middleware.js'
 import type { Protocol } from './clients.js'
 import { appendChunkText, appendRawEvent, emptyDelta, flushDeltaPending, renderDeltaText, type DeltaState } from '../delta.js'
+import { mergeChatCompletionDelta } from './chatCompletionDelta.js'
 
 // 日志目录：项目根下的 logs/（已在 .gitignore 忽略）
 export const LOGS_DIR = join(process.cwd(), 'logs')
@@ -136,22 +137,13 @@ function aggregateResponse(protocol: Protocol, events: unknown[]): unknown {
   if (protocol === 'openai-chat-completions') {
     // 非流式：object 为 chat.completion
     if (list[0]?.object !== 'chat.completion.chunk') return events[0]
-    // 通用合并：delta 里所有字段都保留——字符串字段（content / reasoning_content 等）拼接，
-    // 其他字段取最后一个非空值，避免只挑 content 而丢掉推理内容或工具调用
+    // 通用合并（与客户端回放同一份实现，见 chatCompletionDelta.ts）：delta 里所有字段都保留——
+    // 字符串字段拼接、tool_calls 按 index 归并（arguments 是分片 JSON 必须拼接）、其余取非空值
     const message: Record<string, unknown> = {}
     for (const c of list) {
       const delta = c.choices?.[0]?.delta
       if (!delta) continue
-      for (const [key, value] of Object.entries(delta)) {
-        if (key === 'role') {
-          // role 是固定值，不参与拼接（多个 chunk 都可能带上）
-          message.role = value
-        } else if (typeof value === 'string') {
-          message[key] = ((message[key] as string) ?? '') + value
-        } else if (value != null) {
-          message[key] = value
-        }
-      }
+      mergeChatCompletionDelta(message, delta)
     }
     // 协议要求 message 必须带 role
     if (message.role == null) {

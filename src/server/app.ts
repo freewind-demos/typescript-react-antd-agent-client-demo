@@ -5,7 +5,7 @@
 // 两种方式路由完全一致（都带 /api 前缀）。
 
 import express from 'express'
-import { chatWithProtocol, listModelsWithFallback, type ChatRequest, type ChatResult, type Protocol } from './clients.js'
+import { chatWithProtocol, listModelsWithFallback, type ChatRequest, type Protocol } from './clients.js'
 import { LogManager } from './logger.js'
 import { ConversationStore } from './conversation.js'
 import type { LogEvent } from './middleware.js'
@@ -39,11 +39,15 @@ function handleChat(protocol: Protocol) {
     try {
       // 日志回调：写文件 + 广播给订阅的 SSE 客户端（带协议用于生成整合摘要）
       const onEvent = (event: LogEvent) => logManager.append(sessionId, event, protocol)
-      const result: ChatResult = await chatWithProtocol(protocol, { baseUrl, apiKey, model, text, conversation, stream: !!stream, onEvent })
+      // 文本增量序列：流式与非流式消费的是同一条 agent loop
+      const deltas = chatWithProtocol(protocol, { baseUrl, apiKey, model, text, conversation, stream: !!stream, onEvent })
 
-      if (!result.stream) {
-        // 非流式：直接返回完整文本
-        res.json({ text: result.text })
+      if (!stream) {
+        // 非流式：把增量跑干拼成完整文本，一次性返回（此刻还没写过响应头，
+        // 所以中途出错仍能走下面的 500 分支）
+        let result = ''
+        for await (const delta of deltas) result += delta
+        res.json({ text: result })
         return
       }
 
@@ -52,7 +56,7 @@ function handleChat(protocol: Protocol) {
       res.setHeader('content-type', 'text/event-stream')
       res.setHeader('cache-control', 'no-cache')
       res.setHeader('connection', 'keep-alive')
-      for await (const delta of result.iterator) {
+      for await (const delta of deltas) {
         res.write(`data: ${JSON.stringify({ delta })}\n\n`)
       }
       res.write('data: [DONE]\n\n')

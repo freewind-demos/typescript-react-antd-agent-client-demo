@@ -6,6 +6,7 @@ import OpenAI from 'openai'
 import { createLoggingFetch, type LogEvent } from './middleware.js'
 import type { Conversation } from './conversation.js'
 import { BASH_TOOL_ANTHROPIC, BASH_TOOL_CHAT, BASH_TOOL_RESPONSES, BASH_TOOL_NAME, executeBash, formatBashResult, type BashResult } from './tools.js'
+import { mergeChatCompletionDelta } from './chatCompletionDelta.js'
 
 // 支持的三种协议标识（书写顺序与 protocols.ts 一致：OpenAI 在前，Anthropic 最后）
 export type Protocol = 'openai-chat-completions' | 'openai-responses' | 'anthropic-messages'
@@ -19,61 +20,15 @@ export type ChatRequest = {
   text: string
   // 会话历史：协议原生消息序列，由服务端按 sessionId 持有（见 conversation.ts），只追加不重建
   conversation: Conversation
+  // 是否向上游发起流式请求（决定 requestTurn 走哪条路；对外统一是文本增量序列）
   stream: boolean
   // 日志事件回调：由调用方绑定到具体会话
   onEvent: (event: LogEvent) => void
 }
 
-// 聊天结果：非流式返回完整文本；流式返回文本增量迭代器
-export type ChatResult =
-  | { stream: false; text: string }
-  | { stream: true; iterator: AsyncIterable<string> }
-
 // 回放用的 assistant 消息类型：OpenAI SDK 的类型只覆盖官方字段，厂商扩展字段（如 DeepSeek 的
 // reasoning_content）不在其中。这里放开为"官方字段 + 任意额外字段"，回放时做到"收到什么就回什么"。
 type ChatCompletionAssistantMessage = OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam & Record<string, unknown>
-
-// 把一片流式 delta 合并进累积中的 assistant message。
-// 不预设字段名——delta 里出现过的键全部保留：字符串拼接、tool_calls 按 index 归并、其余非空值覆盖。
-// 这是为了绕开 SDK 的 finalChatCompletion()：它只拼自己类型里的字段，不认识的字段（reasoning_content
-// 等）会被后一片直接覆盖，只剩最后一片。
-function mergeChatCompletionDelta(message: Record<string, unknown>, delta: Record<string, unknown>): void {
-  for (const [key, value] of Object.entries(delta)) {
-    if (value == null) continue
-    if (key === 'role') {
-      // role 是固定值，不参与拼接
-      message.role = value
-    } else if (typeof value === 'string') {
-      message[key] = ((message[key] as string | undefined) ?? '') + value
-    } else if (key === 'tool_calls' && Array.isArray(value)) {
-      mergeToolCallPieces(message, value as Array<Record<string, unknown>>)
-    } else {
-      message[key] = value
-    }
-  }
-}
-
-// 工具调用分片按 index 归并：id / type 等取非空值，function.arguments 是分片 JSON 需要拼接
-function mergeToolCallPieces(message: Record<string, unknown>, pieces: Array<Record<string, unknown>>): void {
-  const toolCalls = (message.tool_calls as Array<Record<string, unknown>> | undefined) ?? (message.tool_calls = [])
-  for (const piece of pieces) {
-    const index = typeof piece.index === 'number' ? piece.index : 0
-    const slot = toolCalls[index] ?? (toolCalls[index] = { index })
-    for (const [key, value] of Object.entries(piece)) {
-      if (value == null || value === '') continue
-      if (key === 'function' && typeof value === 'object') {
-        const fn = (slot.function as Record<string, unknown> | undefined) ?? (slot.function = {})
-        for (const [fnKey, fnValue] of Object.entries(value as Record<string, unknown>)) {
-          if (fnValue == null || fnValue === '') continue
-          // arguments 是分片 JSON，需要拼接；name 等取非空值
-          fn[fnKey] = fnKey === 'arguments' && typeof fnValue === 'string' ? ((fn[fnKey] as string | undefined) ?? '') + fnValue : fnValue
-        }
-      } else {
-        slot[key] = value
-      }
-    }
-  }
-}
 
 // 按协议创建 SDK 客户端，注入日志 fetch
 function createClient(protocol: Protocol, baseUrl: string, apiKey: string, onEvent: (event: LogEvent) => void): Anthropic | OpenAI {
@@ -132,207 +87,227 @@ async function runBashTool(input: unknown, onEvent: (event: LogEvent) => void): 
   return result
 }
 
-// Anthropic Messages 协议聊天（带 Bash 工具循环）
-async function chatWithAnthropic(req: ChatRequest): Promise<ChatResult> {
+// ---- 协议适配器：三协议各自实现这几个函数，其余全部共用 ----
+
+// 本轮要执行的一个工具调用。key 用于把执行结果对回原调用（各协议的字段名不同）
+type ToolCall = { key: string; input: unknown }
+
+// 工具执行结果，key 与 ToolCall.key 一一对应
+type ToolResult = { key: string; output: string }
+
+// 一轮上游请求产出的事件：文本增量若干次，最后产一次完整响应
+type TurnEvent<T> = { kind: 'text'; delta: string } | { kind: 'done'; res: T }
+
+// 协议适配器：把"发一轮请求 / 取出本轮工具 / 写回历史"三件事交给协议自己，
+// agent loop（判停、执行工具、提交历史）只有一份实现
+type ProtocolAdapter<T> = {
+  // 发一轮上游请求：边收边产文本增量（非流式路径每轮只产一次），最后产一次完整响应
+  requestTurn(messages: unknown[]): AsyncGenerator<TurnEvent<T>>
+  // 本轮响应里要执行的工具调用（保持模型给出的顺序）
+  extractTools(res: T): ToolCall[]
+  // 把本轮响应与工具结果按协议原生形态写回历史（Responses 要求 function_call 与结果成对相邻）
+  commitTurn(messages: unknown[], res: T, results: ToolResult[]): void
+}
+
+// 唯一的 agent loop（三协议共用）。
+//
+// 历史改动全程发生在副本上（copy-on-write）：上游报错、工具执行抛错、轮数超限时整轮丢弃，
+// 绝不把半截历史（有 user 没 assistant、有 tool_calls 没 tool 结果）留在会话里。
+async function* agentLoop<T>(req: ChatRequest, adapter: ProtocolAdapter<T>): AsyncGenerator<string> {
+  const working: unknown[] = [...req.conversation.messages]
+  working.push({ role: 'user', content: req.text })
+
+  for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
+    let res: T | undefined
+    for await (const event of adapter.requestTurn(working)) {
+      if (event.kind === 'text') {
+        // 文本增量：立即往下透传（打字机效果）
+        yield event.delta
+      } else {
+        res = event.res
+      }
+    }
+    if (res === undefined) throw new Error('upstream returned no response')
+
+    const tools = adapter.extractTools(res)
+    if (tools.length === 0) {
+      // 拿到最终回答：到这一刻才把整轮历史提交回会话
+      req.conversation.messages = working
+      return
+    }
+    // 按模型给出的顺序逐个执行（不并行），结果与调用一一对应
+    const results: ToolResult[] = []
+    for (const tool of tools) {
+      const result = await runBashTool(tool.input, req.onEvent)
+      results.push({ key: tool.key, output: formatBashResult(result) })
+    }
+    adapter.commitTurn(working, res, results)
+  }
+  throw new Error(`agent loop exceeded ${MAX_AGENT_TURNS} turns`)
+}
+
+// ---- Anthropic Messages 协议 ----
+
+async function* chatWithAnthropic(req: ChatRequest): AsyncGenerator<string> {
   const client = createClient('anthropic-messages', req.baseUrl, req.apiKey, req.onEvent) as Anthropic
   // 只暴露 Bash 这一个工具
   const tools: Anthropic.Tool[] = [BASH_TOOL_ANTHROPIC]
-  // 会话历史：服务端按 sessionId 持有的协议原生消息序列，只追加不重建
-  const conversation = req.conversation.messages as Anthropic.MessageParam[]
-  conversation.push({ role: 'user', content: req.text })
 
-  // 非流式：内部跑完整 agent loop，只在最后一轮（无工具调用）返回文本
-  if (!req.stream) {
-    // 工具调用轮里模型可能先输出一段正文（preamble），这里累积下来与最终回答一起返回，
-    // 保持与流式路径一致（流式会把 preamble 直接推给前端）
-    let preamble = ''
-    for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
-      const res = await client.messages.create({ model: req.model, max_tokens: 4096, messages: conversation, tools })
-      const toolUses = res.content.filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use')
-      // 本轮没有工具调用：即为最终回答
-      if (toolUses.length === 0) {
-        return { stream: false, text: preamble + extractAnthropicText(res.content) }
+  const adapter: ProtocolAdapter<Anthropic.Message> = {
+    // 流式用 SDK 的 stream helper：content blocks 由它自己拼，thinking + signature 一并保留
+    async *requestTurn(messages) {
+      const params = { model: req.model, max_tokens: 4096, messages: messages as Anthropic.MessageParam[], tools }
+      if (!req.stream) {
+        const res = await client.messages.create(params)
+        const text = extractAnthropicText(res.content)
+        if (text) yield { kind: 'text', delta: text }
+        yield { kind: 'done', res }
+        return
       }
-      // 本轮是工具调用轮：保留其正文，再把上游返回的 content blocks 原样放回对话
-      //（含 thinking + signature；signature 不回放会被部分上游拒绝）
-      preamble += extractAnthropicText(res.content)
-      conversation.push({ role: 'assistant', content: res.content as Anthropic.ContentBlockParam[] })
-      const toolResults: Anthropic.ToolResultBlockParam[] = []
-      for (const toolUse of toolUses) {
-        const result = await runBashTool(toolUse.input, req.onEvent)
-        toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: formatBashResult(result) })
+      const stream = client.messages.stream(params)
+      for await (const event of stream) {
+        if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+          yield { kind: 'text', delta: event.delta.text }
+        }
       }
-      conversation.push({ role: 'user', content: toolResults })
-    }
-    throw new Error(`agent loop exceeded ${MAX_AGENT_TURNS} turns`)
+      yield { kind: 'done', res: await stream.finalMessage() }
+    },
+    extractTools(res) {
+      return res.content
+        .filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use')
+        .map((block) => ({ key: block.id, input: block.input }))
+    },
+    // 原样放回：上游返回的 content blocks 整份进对话（含 thinking + signature）；
+    // 工具结果合并成一条 user 消息（Anthropic 的 tool_result 就是 user 侧内容）
+    commitTurn(messages, res, results) {
+      messages.push({ role: 'assistant', content: res.content as Anthropic.ContentBlockParam[] })
+      messages.push({
+        role: 'user',
+        content: results.map((r) => ({ type: 'tool_result', tool_use_id: r.key, content: r.output })),
+      })
+    },
   }
 
-  // 流式：逐轮请求，边收边 yield 文本；本轮出现工具调用则执行后进入下一轮
-  return {
-    stream: true,
-    iterator: (async function* () {
-      for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
-        // 用 SDK 的 stream helper：既能边收边拿文本增量，又能从 finalMessage() 拿到完整消息
-        //（content blocks 由 SDK 自己拼，thinking + signature 一并保留）
-        const stream = client.messages.stream({ model: req.model, max_tokens: 4096, messages: conversation, tools })
-        for await (const event of stream) {
-          if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-            // 文本增量：立即 yield 给前端（打字机效果）
-            yield event.delta.text
-          }
-        }
-        const message = await stream.finalMessage()
-        const toolUses = message.content.filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use')
-        // 本轮无工具调用：整个 agent loop 结束
-        if (toolUses.length === 0) return
-        // 原样放回：上游返回的 content blocks 整份进对话，不挑字段、不重建
-        conversation.push({ role: 'assistant', content: message.content as Anthropic.ContentBlockParam[] })
-        const toolResults: Anthropic.ToolResultBlockParam[] = []
-        for (const toolUse of toolUses) {
-          const result = await runBashTool(toolUse.input, req.onEvent)
-          toolResults.push({ type: 'tool_result', tool_use_id: toolUse.id, content: formatBashResult(result) })
-        }
-        conversation.push({ role: 'user', content: toolResults })
-      }
-      throw new Error(`agent loop exceeded ${MAX_AGENT_TURNS} turns`)
-    })(),
-  }
+  yield* agentLoop(req, adapter)
 }
 
-// OpenAI Chat Completions 协议聊天（带 Bash 工具循环）// OpenAI Chat Completions 协议聊天（带 Bash 工具循环）
-async function chatWithOpenAiChat(req: ChatRequest): Promise<ChatResult> {
+// ---- OpenAI Chat Completions 协议 ----
+
+async function* chatWithOpenAiChat(req: ChatRequest): AsyncGenerator<string> {
   const client = createClient('openai-chat-completions', req.baseUrl, req.apiKey, req.onEvent) as OpenAI
   // 只暴露 Bash 这一个工具
   const tools: OpenAI.Chat.Completions.ChatCompletionTool[] = [BASH_TOOL_CHAT]
-  // 会话历史：服务端按 sessionId 持有的协议原生消息序列，只追加不重建
-  const messages = req.conversation.messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[]
-  messages.push({ role: 'user', content: req.text })
 
-  // 非流式：内部跑完整 agent loop，只在最后一轮（无工具调用）返回文本
-  if (!req.stream) {
-    for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
-      const res = await client.chat.completions.create({ model: req.model, messages, tools })
-      const message = res.choices[0]?.message
-      if (!message) return { stream: false, text: '' }
+  const adapter: ProtocolAdapter<Record<string, unknown>> = {
+    // 流式刻意不用 SDK 的 stream helper：finalChatCompletion() 只拼它类型里的字段，
+    // reasoning_content 这类厂商扩展会被后一片覆盖、只剩最后一片。这里自己通用合并。
+    async *requestTurn(messages) {
+      const params = { model: req.model, messages: messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[], tools }
+      if (!req.stream) {
+        const res = await client.chat.completions.create(params)
+        const message = res.choices[0]?.message as unknown as Record<string, unknown> | undefined
+        if (!message) throw new Error('upstream returned no message')
+        const content = typeof message.content === 'string' ? message.content : ''
+        if (content) yield { kind: 'text', delta: content }
+        yield { kind: 'done', res: message }
+        return
+      }
+      const stream = await client.chat.completions.create({ ...params, stream: true })
+      // 本轮累积成一条完整的 assistant message：delta 里出现过的字段全部保留
+      //（content / tool_calls / reasoning_content …），不挑字段
+      const message: Record<string, unknown> = {}
+      let yieldedLength = 0
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta as Record<string, unknown> | undefined
+        if (!delta) continue
+        mergeChatCompletionDelta(message, delta)
+        // 文本增量：立即 yield 给下游（打字机效果）；从累积体里取还没吐出去的部分
+        const content = typeof message.content === 'string' ? message.content : ''
+        if (content.length > yieldedLength) {
+          yield { kind: 'text', delta: content.slice(yieldedLength) }
+          yieldedLength = content.length
+        }
+      }
+      if (message.role == null) message.role = 'assistant'
+      yield { kind: 'done', res: message }
+    },
+    extractTools(res) {
+      const calls = (res.tool_calls as Array<Record<string, unknown>> | undefined) ?? []
       // 只处理标准 function 调用（本 demo 不使用 custom tool）
-      const toolCalls = (message.tool_calls ?? []).filter((call) => call.type === 'function')
-      // 本轮没有工具调用：即为最终回答
-      if (toolCalls.length === 0) {
-        return { stream: false, text: message.content ?? '' }
+      return calls
+        .filter((call) => call.type === 'function')
+        .map((call) => ({ key: call.id as string, input: parseToolArgs((call.function as { arguments?: string } | undefined)?.arguments ?? '') }))
+    },
+    // 原样放回：上游返回的 assistant message 整份追加（含 reasoning_content 等 SDK 类型外的字段），
+    // 每个工具结果以 role:'tool' 消息按模型给出的顺序回传
+    commitTurn(messages, res, results) {
+      messages.push(res as ChatCompletionAssistantMessage)
+      for (const r of results) {
+        messages.push({ role: 'tool', tool_call_id: r.key, content: r.output })
       }
-      // 原样放回：上游返回的 assistant message 整份追加（含 reasoning_content 等 SDK 类型外的字段），
-      // 再把每个工具结果以 role:'tool' 消息按模型给出的顺序回传
-      messages.push(message as ChatCompletionAssistantMessage)
-      for (const call of toolCalls) {
-        const result = await runBashTool(parseToolArgs(call.function.arguments), req.onEvent)
-        messages.push({ role: 'tool', tool_call_id: call.id, content: formatBashResult(result) })
-      }
-    }
-    throw new Error(`agent loop exceeded ${MAX_AGENT_TURNS} turns`)
+    },
   }
 
-  // 流式：逐轮请求，边收边 yield 文本；本轮出现工具调用则执行后进入下一轮
-  return {
-    stream: true,
-    iterator: (async function* () {
-      for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
-        const stream = await client.chat.completions.create({ model: req.model, messages, tools, stream: true })
-        // 本轮累积成一条完整的 assistant message：delta 里出现过的字段全部保留
-        //（content / tool_calls / reasoning_content …），不挑字段
-        const message: Record<string, unknown> = {}
-        let yieldedLength = 0
-        for await (const chunk of stream) {
-          const delta = chunk.choices[0]?.delta as Record<string, unknown> | undefined
-          if (!delta) continue
-          mergeChatCompletionDelta(message, delta)
-          // 文本增量：立即 yield 给前端（打字机效果）；从累积体里取增量部分
-          const content = typeof message.content === 'string' ? message.content : ''
-          if (content.length > yieldedLength) {
-            yield content.slice(yieldedLength)
-            yieldedLength = content.length
-          }
-        }
-        const toolCalls = ((message.tool_calls as Array<Record<string, unknown>> | undefined) ?? []).filter((call) => call.type === 'function')
-        // 本轮无工具调用：整个 agent loop 结束
-        if (toolCalls.length === 0) return
-        if (message.role == null) message.role = 'assistant'
-        // 原样放回（message 里 tool_calls 已按 index 归并、保持模型给出的顺序）
-        messages.push(message as ChatCompletionAssistantMessage)
-        for (const call of toolCalls) {
-          const fn = call.function as { name?: string; arguments?: string } | undefined
-          const result = await runBashTool(parseToolArgs(fn?.arguments ?? ''), req.onEvent)
-          messages.push({ role: 'tool', tool_call_id: call.id as string, content: formatBashResult(result) })
-        }
-      }
-      throw new Error(`agent loop exceeded ${MAX_AGENT_TURNS} turns`)
-    })(),
-  }
+  yield* agentLoop(req, adapter)
 }
 
-// OpenAI Responses 协议聊天（带 Bash 工具循环）// OpenAI Responses 协议聊天（带 Bash 工具循环）
-async function chatWithOpenAiResponses(req: ChatRequest): Promise<ChatResult> {
+// ---- OpenAI Responses 协议 ----
+
+async function* chatWithOpenAiResponses(req: ChatRequest): AsyncGenerator<string> {
   const client = createClient('openai-responses', req.baseUrl, req.apiKey, req.onEvent) as OpenAI
   // 只暴露 Bash 这一个工具（Responses 的工具声明是扁平结构）
   const tools: OpenAI.Responses.Tool[] = [BASH_TOOL_RESPONSES]
-  // 会话历史：服务端按 sessionId 持有的协议原生 input 序列，只追加不重建
-  const input = req.conversation.messages as OpenAI.Responses.ResponseInput
-  input.push({ role: 'user', content: req.text })
 
-  // 把本轮 output 原样按顺序放回 input，并在每个 function_call 之后紧跟它的 function_call_output
-  //（保持模型给出的顺序；并行工具调用时也必须成对，不能先放全部 call 再放全部 output）
-  async function appendOutput(output: OpenAI.Responses.ResponseOutputItem[], onEvent: (event: LogEvent) => void): Promise<void> {
-    for (const item of output) {
-      input.push(item as OpenAI.Responses.ResponseInputItem)
-      if (item.type === 'function_call') {
-        const result = await runBashTool(parseToolArgs(item.arguments), onEvent)
-        input.push({ type: 'function_call_output', call_id: item.call_id, output: formatBashResult(result) })
+  const adapter: ProtocolAdapter<OpenAI.Responses.Response> = {
+    async *requestTurn(messages) {
+      const params = { model: req.model, input: messages as OpenAI.Responses.ResponseInput, tools }
+      if (!req.stream) {
+        const res = await client.responses.create(params)
+        if (res.output_text) yield { kind: 'text', delta: res.output_text }
+        yield { kind: 'done', res }
+        return
       }
-    }
-  }
-
-  // 非流式：内部跑完整 agent loop，只在最后一轮（无工具调用）返回文本
-  if (!req.stream) {
-    for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
-      const res = await client.responses.create({ model: req.model, input, tools })
-      // finalResponse/create 的 output 是 SDK 的 Parsed 类型，这里按协议原生条目处理
-      const output = res.output as unknown as OpenAI.Responses.ResponseOutputItem[]
-      const calls = output.filter((item): item is OpenAI.Responses.ResponseFunctionToolCall => item.type === 'function_call')
-      // 本轮没有工具调用：即为最终回答
-      if (calls.length === 0) {
-        return { stream: false, text: res.output_text }
-      }
-      await appendOutput(output, req.onEvent)
-    }
-    throw new Error(`agent loop exceeded ${MAX_AGENT_TURNS} turns`)
-  }
-
-  // 流式：逐轮请求，边收边 yield 文本；本轮出现工具调用则执行后进入下一轮
-  return {
-    stream: true,
-    iterator: (async function* () {
-      for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
-        const stream = client.responses.stream({ model: req.model, input, tools })
-        for await (const event of stream) {
-          if (event.type === 'response.output_text.delta') {
-            // 文本增量：立即 yield 给前端（打字机效果）
-            yield event.delta
-          }
+      const stream = client.responses.stream(params)
+      for await (const event of stream) {
+        if (event.type === 'response.output_text.delta') {
+          yield { kind: 'text', delta: event.delta }
         }
-        // 用 finalResponse() 拿完整 response，output 里的条目原样放回 input
-        const response = await stream.finalResponse()
-        const output = response.output as unknown as OpenAI.Responses.ResponseOutputItem[]
-        const calls = output.filter((item): item is OpenAI.Responses.ResponseFunctionToolCall => item.type === 'function_call')
-        // 本轮无工具调用：整个 agent loop 结束
-        if (calls.length === 0) return
-        await appendOutput(output, req.onEvent)
       }
-      throw new Error(`agent loop exceeded ${MAX_AGENT_TURNS} turns`)
-    })(),
+      // 用 finalResponse() 拿完整 response，output 里的条目原样放回 input
+      yield { kind: 'done', res: await stream.finalResponse() }
+    },
+    extractTools(res) {
+      const output = res.output as unknown as OpenAI.Responses.ResponseOutputItem[]
+      return output
+        .filter((item): item is OpenAI.Responses.ResponseFunctionToolCall => item.type === 'function_call')
+        .map((item) => ({ key: item.call_id, input: parseToolArgs(item.arguments) }))
+    },
+    // 本轮 output 按原顺序整体放回，并在每个 function_call 之后紧跟它的 function_call_output
+    //（并行工具调用时也必须成对，不能先放全部 call 再放全部 output）
+    commitTurn(messages, res, results) {
+      const byKey = new Map(results.map((r) => [r.key, r.output]))
+      const output = res.output as unknown as OpenAI.Responses.ResponseOutputItem[]
+      for (const item of output) {
+        // finalResponse() 会给 function_call 条目补上 parsed_arguments（SDK Parsed 类型的产物），
+        // 它不是协议字段、上游不认（实测 400: Unknown parameter 'input[2].parsed_arguments'），
+        // 回放前剥掉。其余字段（含上游自己加的 metadata 之类）一律原样保留。
+        const clean = { ...(item as unknown as Record<string, unknown>) }
+        delete clean.parsed_arguments
+        messages.push(clean as unknown as OpenAI.Responses.ResponseInputItem)
+        if (item.type === 'function_call') {
+          messages.push({ type: 'function_call_output', call_id: item.call_id, output: byKey.get(item.call_id) ?? '' })
+        }
+      }
+    },
   }
+
+  yield* agentLoop(req, adapter)
 }
 
-// 统一聊天入口：按协议分发到对应实现
-export function chatWithProtocol(protocol: Protocol, req: ChatRequest): Promise<ChatResult> {
+// 统一聊天入口：按协议分发。返回文本增量序列 ——
+// 流式就直接转发给前端；非流式把这条序列跑干拼成完整文本再一次性返回（上游仍是非流式请求）。
+// 生成器是惰性的：调用它不发起任何请求，首次迭代才开始。
+export function chatWithProtocol(protocol: Protocol, req: ChatRequest): AsyncGenerator<string> {
   switch (protocol) {
     case 'anthropic-messages':
       return chatWithAnthropic(req)
