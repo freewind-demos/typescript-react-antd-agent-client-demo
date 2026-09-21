@@ -39,10 +39,3 @@ export const PROTOCOLS: ProtocolMeta[] = [
     modelsEndpoint: '/api/anthropic/models',
   },
 ]
-
-// 一条前端展示用的日志：类型 + 格式化好的文本 + 时间戳
-export type LogEntry = {
-  type: 'request' | 'response' | 'chunk' | 'error' | 'end'
-  text: string
-  timestamp: number
-}
