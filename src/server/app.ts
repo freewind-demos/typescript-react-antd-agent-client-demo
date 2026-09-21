@@ -131,7 +131,7 @@ export function buildApp(): express.Express {
     })
   })
 
-  // 读取某个会话的结构化 JSON（日志面板"JSON"Tab 全量恢复用）
+  // 读取某个会话的结构化 JSON（日志面板「会话」Tab 全量恢复用）
   app.get('/api/logs/:sessionId/json', (req, res) => {
     const data = logManager.readJsonFile(req.params.sessionId)
     if (data === null) {

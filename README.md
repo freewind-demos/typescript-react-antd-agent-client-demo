@@ -2,11 +2,12 @@
 
 ## 简介
 
-这个 Demo 演示一个 **Agent Client 调试工具**：在一个微信式聊天界面里，通过三种不同的 AI 协议（Anthropic Messages、OpenAI Chat Completions、OpenAI Responses）与模型对话，并在右侧日志面板从 Client 视角记录每一次交互。它同时是一个 **Agent 客户端**：只给模型提供一个 `Bash` 工具，模型可以真的在本地执行 shell 命令，并根据执行结果继续对话（工具循环在 Server 端完成，前端在聊天区展示工具调用气泡）。日志面板分三个 Tab：
+这个 Demo 演示一个 **Agent Client 调试工具**：在一个微信式聊天界面里，通过三种不同的 AI 协议（Anthropic Messages、OpenAI Chat Completions、OpenAI Responses）与模型对话，并在右侧日志面板从 Client 视角记录每一次交互。它同时是一个 **Agent 客户端**：只给模型提供一个 `Bash` 工具，模型可以真的在本地执行 shell 命令，并根据执行结果继续对话（工具循环在 Server 端完成，前端在聊天区展示工具调用气泡）。日志面板分四个 Tab：
 
-- **请求/响应**（默认）：上下两个区域，各只保留最近 2 条（最新的在下，多余的被顶掉）。Request 区显示协议原生的请求 JSON，Response 区显示**聚合后的完整响应**（流式响应把文本增量拼完整、补齐 stop_reason / usage 等）
+- **请求/响应**（默认）：上下两个区域，各只显示最新 1 条。Request 区显示协议原生的请求 JSON，Response 区显示**聚合后的完整响应**（流式响应把文本增量拼完整、补齐 stop_reason / usage 等）
 - **会话**：整个会话的数组，一项 = 一个请求 + 一个回复，均为协议原生 JSON
-- **verbose**：最底层的原样记录——请求的 method、URL、全部 headers、body，响应的状态码、全部 headers、body，流式响应时每一个 SSE 分片单独一条、绝不合并
+- **delta**：与 raw 同内容，但以完整 SSE 事件（event: / data:）为单位展示，结构完全一致的连续事件合并成一条
+- **raw**：最底层的原样记录——请求的 method、URL、全部 headers、body，响应的状态码、全部 headers、body，流式响应时每一个 SSE 分片单独一条、绝不合并
 
 它解决的问题：真实业务中我们调用 AI 协议时用的是官方 SDK，SDK 内部自动拼接 URL、自动加 headers（如 `x-api-key`、`anthropic-version`、`user-agent`），出了问题很难看到"网络上到底发了什么"。本 Demo 在 SDK 底层注入一层日志中间件，把 SDK 发出的每一个 HTTP 请求原样记录下来，让你看清协议的真实形态。
 
@@ -38,7 +39,7 @@ pnpm run dev
 2. 填 API URL 和 API Key（Anthropic 填根地址如 `https://api.anthropic.com`；OpenAI 填到 `/v1` 如 `https://api.openai.com/v1`；中转服务按其要求填）
 3. 点 Fetch Models 拉取模型列表，从下拉里选一个模型
 4. 打开/关闭"流式"开关，在聊天框输入消息回车发送
-5. 看右侧日志面板：默认"请求/响应"Tab 显示当前请求/响应的协议内容，"会话"Tab 看整个会话，"verbose"Tab 看最底层原样日志
+5. 看右侧日志面板：默认"请求/响应"Tab 显示当前请求/响应的协议内容，"会话"Tab 看整个会话，“delta”Tab 看合并后的流式事件，“raw”Tab 看最底层原样日志
 
 ## 注意事项
 
@@ -98,7 +99,7 @@ Demo 只给模型提供**一个**工具 `Bash`（`command` 必填，`timeout` �
 
 **Agent 循环**：三种协议的 chat 函数（`src/server/clients.ts`）内部都跑同一个循环——请求模型 → 若模型要调用工具就执行 Bash 并把结果回传 → 再请求模型，直到模型不再调用工具（最多 20 轮）。非流式在循环跑完后一次性返回最终文本；流式则边收边把文本增量推给前端，遇到工具调用时先执行、再进入下一轮。
 
-**展示**：每次工具执行都会触发一条 `tool` 日志事件（入参、输出、退出码），既写进 verbose 日志、挂到日志面板"会话"Tab 对应那一条请求上，也通过 SSE 送到前端，在聊天区渲染成一个"工具气泡"。
+**展示**：每次工具执行都会触发一条 `tool` 日志事件（入参、输出、退出码），挂到日志面板"会话"Tab 对应那一条请求上（不进 raw 日志），也通过 SSE 送到前端，在聊天区渲染成一个"工具气泡"。
 
 ### 会话状态与历史回放（关键）
 
