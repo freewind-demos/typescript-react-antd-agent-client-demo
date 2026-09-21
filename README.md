@@ -4,8 +4,8 @@
 
 这个 Demo 演示一个 **Agent Client 调试工具**：在一个微信式聊天界面里，通过三种不同的 AI 协议（Anthropic Messages、OpenAI Chat Completions、OpenAI Responses）与模型对话，并在右侧日志面板从 Client 视角记录每一次交互。它同时是一个 **Agent 客户端**：只给模型提供一个 `Bash` 工具，模型可以真的在本地执行 shell 命令，并根据执行结果继续对话（工具循环在 Server 端完成，前端在聊天区展示工具调用气泡）。日志面板分四个 Tab：
 
-- **请求/响应**（默认）：上下两个区域，各只显示最新 1 条。Request 区显示协议原生的请求 JSON，Response 区显示**聚合后的完整响应**（流式响应把文本增量拼完整、补齐 stop_reason / usage 等）
-- **会话**：整个会话的数组，一项 = 一个请求 + 一个回复，均为协议原生 JSON
+- **请求/响应**（默认）：上下两个区域，各只显示最新 1 条。Request 区显示协议原生的请求 JSON，Response 区显示 **SDK 解析出的完整响应**（非流式即上游返回的完整对象，流式为 SDK 恢复出的完整消息）；两者的 HTTP 元信息（method/URL、status/headers）以 `//` 注释标注在正文前
+- **会话**：整个会话的数组，一项 = 一个请求 + 一个回复（request 为协议原生 JSON，response 为 SDK 解析出的完整响应），HTTP 元信息同样以 `//` 注释标注（JSONC）
 - **delta**：与 raw 同内容，但以完整 SSE 事件（event: / data:）为单位展示，结构完全一致的连续事件合并成一条
 - **raw**：最底层的原样记录——请求的 method、URL、全部 headers、body，响应的状态码、全部 headers、body，流式响应时每一个 SSE 分片单独一条、绝不合并
 
@@ -35,11 +35,11 @@ pnpm run dev
 
 使用步骤：
 
-1. 选择协议（三种下拉任选，API URL 与 API Key 会带上该协议上次成功使用过的历史值，可改；从没填过则留空）
-2. 填 API URL 和 API Key（Anthropic 填根地址如 `https://api.anthropic.com`；OpenAI 填到 `/v1` 如 `https://api.openai.com/v1`；中转服务按其要求填）
-3. 点 Fetch Models 拉取模型列表，从下拉里选一个模型
-4. 打开/关闭"流式"开关，在聊天框输入消息回车发送
-5. 看右侧日志面板：默认"请求/响应"Tab 显示当前请求/响应的协议内容，"会话"Tab 看整个会话，“delta”Tab 看合并后的流式事件，“raw”Tab 看最底层原样日志
+1. 点 Providers 卡片的“添加”，在弹窗里选协议、填 API URL 与 API Key（Anthropic 填根地址如 `https://api.anthropic.com`；OpenAI 填到 `/v1` 如 `https://api.openai.com/v1`；中转服务按其要求填）
+2. 点弹窗里的 Fetch Models 拉取模型列表，从下拉里选一个（也可手填）
+3. 保存后即为当前 Provider（列表可增删改，存 localStorage）
+4. 在配置区顶部设置“流式”开关与“最大 Tokens”，在聊天框输入消息回车发送
+5. 看右侧日志面板：默认“请求/响应”Tab 显示最新一次的请求/响应，“会话”Tab 看整个会话，“delta”Tab 看合并后的流式事件，“raw”Tab 看最底层原样日志
 
 ## 注意事项
 
@@ -97,15 +97,15 @@ Demo 只给模型提供**一个**工具 `Bash`（`command` 必填，`timeout` �
 
 **工具执行**：`src/server/tools.ts` 的 `executeBash()` 用 Node 的 `child_process` 在 Server 上执行命令，工作目录为项目根，合并 stdout/stderr，返回退出码；默认 30s 超时（可被 `timeout` 参数覆盖），输出超过 20000 字符自动截断。
 
-**Agent 循环**：三种协议的 chat 函数（`src/server/clients.ts`）内部都跑同一个循环——请求模型 → 若模型要调用工具就执行 Bash 并把结果回传 → 再请求模型，直到模型不再调用工具（最多 20 轮）。非流式在循环跑完后一次性返回最终文本；流式则边收边把文本增量推给前端，遇到工具调用时先执行、再进入下一轮。
+**Agent 循环**：三种协议的 chat 函数（`src/server/clients.ts`）内部都跑同一个循环——请求模型 → 若模型要调用工具就执行 Bash 并把结果回传 → 再请求模型，直到模型不再调用工具（最多 20 轮）。循环产出统一的**结构化事件流**（`text` / `tool`）：流式逐条推给前端，非流式收集完整后一次性返回（`{ events: [...] }`）——两者同一套事件语义。
 
-**展示**：每次工具执行都会触发一条 `tool` 日志事件（入参、输出、退出码），挂到日志面板"会话"Tab 对应那一条请求上（不进 raw 日志），也通过 SSE 送到前端，在聊天区渲染成一个"工具气泡"。
+**展示**：每次工具执行会在事件流里就地插一条 `tool` 事件（入参、输出、退出码）。前端据此在聊天区按真实时序渲染“tool call + tool result”两条气泡，并在其后新起一个助手气泡接续后续文字——**聊天区完全由 chat 响应的事件流驱动，不依赖日志 SSE**（日志 SSE 只服务右侧日志面板）。
 
 ### 会话状态与历史回放（关键）
 
 Client 的原则是 **「历史只追加、不重建；收到什么就回放什么」**。上游是无状态的，它每次只收到一份完整的消息数组，所以「记忆」只能由本地这侧保管。
 
-**历史存在哪儿**：`src/server/conversation.ts` 的 `ConversationStore`，按 `sessionId` 存一份**协议原生消息序列**。前端只发本轮输入（`{ baseUrl, apiKey, model, text, stream, sessionId }`），不再自己拼历史——否则前端就得懂三种协议的报文结构；而且把聊天记录「压平成纯文本」等于把 `tool_calls`、`reasoning_content`、Anthropic 的 content block 统统改写掉。
+**历史存在哪儿**：`src/server/conversation.ts` 的 `ConversationStore`，按 `sessionId` 存一份**协议原生消息序列**。前端只发本轮输入（`{ baseUrl, apiKey, model, text, stream, sessionId, maxTokens }`），不再自己拼历史——否则前端就得懂三种协议的报文结构；而且把聊天记录「压平成纯文本」等于把 `tool_calls`、`reasoning_content`、Anthropic 的 content block 统统改写掉。
 
 **怎么回放**：每轮把上游返回的消息**原样**追加进序列，构造下一轮请求时整份发出。
 
@@ -137,8 +137,8 @@ Client 的原则是 **「历史只追加、不重建；收到什么就回放什�
 `src/server/logger.ts` 的 `LogManager`：
 
 - 每条日志事件追加写入 `logs/<sessionId>.log`，格式为 `=== [REQUEST] POST xxx @ 时间 ===` 这类块，区分方向、按时间顺序
-- 同时维护会话交互列表（一个请求配一个回复，均为协议原生 JSON）：请求体直接来自 request body，响应用 `aggregateResponse()` 聚合——流式响应把文本增量拼完整并补齐 stop_reason / finish_reason / usage 等，非流式响应本身就是完整对象；该列表覆盖写入 `logs/<sessionId>.json`
-- 每次事件以 SSE 格式（`data: {...}`）广播给所有订阅了 `/api/logs/stream` 的前端，广播里带上本次的请求 JSON 与聚合后的当前响应，前端直接更新
+- 同时维护会话交互列表（一项 = 一个请求 + 一个回复）：请求体来自 request body（协议原生 JSON），响应正文由 `agentLoop` 每轮触发的 `sdk-response` 事件提供——即 SDK 解析出的完整响应对象（不做本地聚合）；该列表覆盖写入 `logs/<sessionId>.json`
+- 每次事件以 SSE 格式（`data: {...}`）广播给所有订阅了 `/api/logs/stream` 的前端，广播里带上本次的请求 JSON 与 SDK 真实响应对象（`responseBody`），前端直接更新
 
 前端页面加载时建立 `EventSource('/api/logs/stream')` 订阅实时日志；切会话（点"新会话"或刷新）时先 `GET /api/logs/:sessionId` 拉该会话的 verbose 日志、`GET /api/logs/:sessionId/json` 拉交互列表，之后靠 SSE 增量更新。右侧日志区撑满页面高度、各自滚动，并自动滚到最新一条。
 
@@ -154,3 +154,5 @@ Client 的原则是 **「历史只追加、不重建；收到什么就回放什�
 - `vite.config.ts` — Vite 配置，含把 express 挂进 dev server 中间件的插件
 - `src/App.tsx` — 前端界面（左侧配置区 + 微信式聊天，右侧日志面板）
 - `src/protocols.ts` — 三种协议与 Endpoint 的映射定义
+- `src/delta.ts` — delta 视图的纯逻辑（按 SSE 事件切分 / 合并），前端与服务端共用
+- `src/server/chatCompletionDelta.ts` — Chat Completions 流式 delta 的唯一合并实现（回放历史与日志共用）
