@@ -7,7 +7,7 @@
 //
 // 上游是无状态的，它每次只收到一份完整的消息数组——所以"记忆"只能由本地这侧保管。
 
-import type { Protocol } from './clients.js'
+import type { Protocol } from './protocols/core.js'
 
 export type Conversation = {
   protocol: Protocol

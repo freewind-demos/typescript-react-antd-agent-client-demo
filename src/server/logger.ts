@@ -9,7 +9,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { LogEvent } from './middleware.js'
-import type { Protocol } from './clients.js'
+import type { Protocol } from './protocols/core.js'
 import { appendChunkText, appendRawEvent, emptyDelta, flushDeltaPending, renderDeltaText, type DeltaState } from '../delta.js'
 
 // 日志目录：项目根下的 logs/（已在 .gitignore 忽略）

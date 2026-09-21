@@ -5,7 +5,9 @@
 // 两种方式路由完全一致（都带 /api 前缀）。
 
 import express from 'express'
-import { chatWithProtocol, listModelsWithFallback, type ChatEvent, type ChatRequest, type Protocol } from './clients.js'
+import { chatWithProtocol } from './protocols/index.js'
+import { listModelsWithFallback } from './models.js'
+import type { ChatEvent, ChatRequest, Protocol } from './protocols/core.js'
 import { LogManager } from './logger.js'
 import { ConversationStore } from './conversation.js'
 import type { LogEvent } from './middleware.js'
