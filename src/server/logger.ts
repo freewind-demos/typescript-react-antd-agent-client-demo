@@ -74,6 +74,38 @@ function extractProtocolJsons(raw: string): unknown[] {
   return result
 }
 
+// 把「按网络分块到达的响应文本」解析成协议 JSON，返回本次能完整解析出的部分 + 还没收完的尾巴。
+//
+// 为什么需要它：TCP 分块边界与 SSE 事件边界无关，一个大 JSON（Responses 的 response.completed、
+// 非流式的整个响应体）常常被切成几段。逐块独立 JSON.parse 会把它们整段静默丢掉 —— 日志面板上
+// 表现为响应体是 null 或某个半截事件。
+function takeResponseEvents(text: string, isSse: boolean, force = false): { events: unknown[]; rest: string } {
+  if (!isSse) {
+    // 非流式：整个响应体是一个 JSON，完整了才能解析（没完整就留着，等后面的分块）
+    try {
+      return { events: [JSON.parse(text)], rest: '' }
+    } catch {
+      return { events: [], rest: force ? '' : text }
+    }
+  }
+  // 流式：SSE 事件以空行分隔，只解析已经收到完整空行的事件（force=true 时连尾巴一起试）
+  const boundary = force ? text.length : text.lastIndexOf('\n\n')
+  if (boundary < 0) return { events: [], rest: text }
+  const events: unknown[] = []
+  for (const line of text.slice(0, boundary).split('\n')) {
+    if (!line.startsWith('data: ')) continue
+    const payload = line.slice(6).trim()
+    // SSE 结束标记不是协议内容
+    if (payload === '' || payload === '[DONE]') continue
+    try {
+      events.push(JSON.parse(payload))
+    } catch {
+      // 无法解析的行跳过
+    }
+  }
+  return { events, rest: text.slice(boundary + 2) }
+}
+
 // 把一次响应的所有事件聚合成"完整响应对象"（会话 JSON 里展示用）：
 // 流式响应把文本增量拼完整、补齐结束原因等；非流式响应直接就是完整对象。
 function aggregateResponse(protocol: Protocol, events: unknown[]): unknown {
@@ -187,6 +219,10 @@ type SessionState = {
   interactions: InteractionRecord[]
   // 当前正在累积的响应事件
   events: unknown[]
+  // 当前响应已收到的原始文本（网络分块边界不可靠，必须自己拼回完整事件再解析）
+  pendingText: string
+  // 当前响应是不是 SSE（由响应头的 content-type 判定）
+  pendingIsSse: boolean
   // 当前请求使用的协议（聚合时用）
   protocol: Protocol | undefined
   // 会话的 delta 状态（与前端 delta Tab 同规则累积，落盘到 <sessionId>.delta.log）
@@ -230,18 +266,39 @@ export class LogManager {
     // 请求事件：请求体就是协议 JSON；chunk 事件：响应里每个 data: 行是协议事件 JSON
     let requestJson: unknown
     let currentResponse: unknown
-    const state = this.sessionStates[sessionId] ?? (this.sessionStates[sessionId] = { interactions: [], events: [], protocol: undefined, delta: emptyDelta() })
+    const state = this.sessionStates[sessionId] ?? (this.sessionStates[sessionId] = { interactions: [], events: [], pendingText: '', pendingIsSse: false, protocol: undefined, delta: emptyDelta() })
+
+    // 把解析出来的响应事件并入当前交互：更新聚合正文并落盘
+    const commitResponseEvents = (evs: unknown[]): void => {
+      if (evs.length === 0) return
+      state.events.push(...evs)
+      currentResponse = aggregateResponse(state.protocol ?? 'openai-chat-completions', state.events)
+      const last = state.interactions[state.interactions.length - 1]
+      if (last) {
+        last.response = {
+          status: last.response?.status ?? 0,
+          statusText: last.response?.statusText ?? '',
+          headers: last.response?.headers ?? {},
+          body: currentResponse,
+        }
+      }
+      this.writeJsonFile(sessionId, state)
+    }
 
     if (event.type === 'request') {
       // 新的一次交互开始：记录请求元信息与请求体，重置当前响应事件
       const parsed = extractProtocolJsons(event.bodyText)
       requestJson = parsed[0] ?? null
       state.events = []
+      state.pendingText = ''
+      state.pendingIsSse = false
       state.protocol = _protocol
       state.interactions.push({ request: { method: event.method, url: event.url, headers: event.headers, body: requestJson }, response: null })
       this.writeJsonFile(sessionId, state)
     } else if (event.type === 'response') {
-      // 收到响应头：记录状态与 headers（正文等 chunk 聚合）
+      // 收到响应头：记录状态与 headers（正文等 chunk 聚合），并记下这是不是 SSE 响应
+      const contentType = Object.entries(event.headers).find(([k]) => k.toLowerCase() === 'content-type')?.[1] ?? ''
+      state.pendingIsSse = contentType.includes('text/event-stream')
       const last = state.interactions[state.interactions.length - 1]
       if (last) {
         last.response = { status: event.status, statusText: event.statusText, headers: event.headers, body: last.response?.body ?? null }
@@ -255,23 +312,14 @@ export class LogManager {
       }
       this.writeJsonFile(sessionId, state)
     } else if (event.type === 'chunk') {
-      // 累积响应事件，聚合出完整响应正文
-      const evs = extractProtocolJsons(event.text)
-      if (evs.length > 0) {
-        state.events.push(...evs)
-        // 兜底协议取列表第一个（正常情况下 protocol 一定由请求带入，这里几乎不会用到）
-        currentResponse = aggregateResponse(state.protocol ?? 'openai-chat-completions', state.events)
-        const last = state.interactions[state.interactions.length - 1]
-        if (last) {
-          last.response = {
-            status: last.response?.status ?? 0,
-            statusText: last.response?.statusText ?? '',
-            headers: last.response?.headers ?? {},
-            body: currentResponse,
-          }
-        }
-        this.writeJsonFile(sessionId, state)
-      }
+      // 网络分块边界与协议事件边界无关：先累积原始文本，只解析「已经收完整」的部分，
+      // 剩下的尾巴留到后续分块（响应结束时再强制解析一次）
+      state.pendingText += event.text
+      // content-type 缺失时按 `data: ` 前缀兜底识别 SSE
+      const isSse = state.pendingIsSse || state.pendingText.trimStart().startsWith('data:')
+      const { events: evs, rest } = takeResponseEvents(state.pendingText, isSse)
+      state.pendingText = rest
+      commitResponseEvents(evs)
     }
 
     // ---- 同步 Delta 日志：内容与前端 delta Tab 完全一致 ----
@@ -281,6 +329,13 @@ export class LogManager {
       state.delta = appendChunkText(state.delta, event.timestamp, event.text)
       this.writeDeltaFile(sessionId, state)
     } else if (event.type === 'end' || event.type === 'error') {
+      // 响应结束：把缓冲里最后没切完的尾巴强制解析一次（不完整的 JSON 解析失败即丢）
+      if (state.pendingText) {
+        const isSse = state.pendingIsSse || state.pendingText.trimStart().startsWith('data:')
+        const { events: evs } = takeResponseEvents(state.pendingText, isSse, true)
+        state.pendingText = ''
+        commitResponseEvents(evs)
+      }
       state.delta = flushDeltaPending(state.delta, event.timestamp)
       if (isProtocolEvent(event)) state.delta = appendRawEvent(state.delta, formatLogEvent(event))
       this.writeDeltaFile(sessionId, state)
