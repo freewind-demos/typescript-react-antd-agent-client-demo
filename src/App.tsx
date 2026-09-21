@@ -3,7 +3,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { Button, Card, Flex, Input, InputNumber, Popconfirm, Space, Splitter, Switch, Tabs, Typography, message } from 'antd'
-import { PROTOCOLS, type Protocol } from './protocols'
+import { PROTOCOLS } from './protocols'
 import { appendChunkText, appendRawEvent, emptyDelta, flushDeltaPending, renderDeltaText, type DeltaState } from './delta'
 import { getProviders, getSelectedProviderId, saveProviders, saveSelectedProviderId, type Provider } from './config'
 import ProviderModal, { type ProviderDraft } from './ProviderModal'
@@ -30,6 +30,11 @@ type ChatMessage = { role: 'user' | 'assistant' | 'tool' | 'error'; content: str
 type InteractionRecord = {
   request: { method: string; url: string; headers: Record<string, string>; body: unknown } | null
   response: { status: number; statusText: string; headers: Record<string, string>; body: unknown } | null
+}
+
+// 会话与 Provider 的绑定指纹：id + 协议 + API URL + 模型，任一变化都视为“换了 Provider”
+function providerFingerprint(provider: Provider): string {
+  return `${provider.id}|${provider.protocol}|${provider.baseUrl}|${provider.model}`
 }
 
 // headers 转成若干行注释文本
@@ -104,8 +109,9 @@ export default function App() {
   const [stream, setStream] = useState(true)
   // 全局最大生成 tokens（与具体 Provider 无关；界面可见、可改）
   const [maxTokens, setMaxTokens] = useState(DEFAULT_MAX_TOKENS)
-  // 当前会话绑定的协议：会话历史是协议原生的报文（见 server/conversation.ts），换协议必须开新会话
-  const [sessionProtocol, setSessionProtocol] = useState<Protocol | null>(null)
+  // 当前会话绑定的 Provider 指纹：会话历史是协议原生报文（见 server/conversation.ts），
+  // 换协议、换 Provider、或改掉它的 URL/模型，历史都不再通用，必须开新会话
+  const [sessionProviderKey, setSessionProviderKey] = useState<string | null>(null)
 
   // ---- 聊天区状态 ----
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -140,10 +146,14 @@ export default function App() {
     setProviders(next)
     saveProviders(next)
   }
-  // 持久化：切换选中的 Provider
+  // 持久化：切换选中的 Provider。
+  // 切换 Provider 即换会话：历史是协议原生报文，不同 Provider（哪怕同协议）的上游与模型都不同，
+  // 直接复用会把 A 的完整对话发给 B，既会串线也可能泄露内容。
   const selectProvider = (id: string | null) => {
+    if (id === selectedProviderId) return
     setSelectedProviderId(id)
     saveSelectedProviderId(id)
+    newSession()
   }
   // 打开"添加"弹窗
   const openAddProvider = () => {
@@ -181,7 +191,7 @@ export default function App() {
     setDeltaState(emptyDelta())
     setSessionJson([])
     setCurrentPair(null)
-    setSessionProtocol(null)
+    setSessionProviderKey(null)
   }
 
   // 新会话：生成新 sessionId（新日志文件），清空聊天与日志
@@ -356,14 +366,16 @@ export default function App() {
       message.warning('请先添加并选择一个 Provider')
       return
     }
-    // 换协议必须开新会话：历史是上一个协议的原生报文，跨协议复用会发出错误结构。
-    //（服务端也有同样的保护：协议不一致时视为新会话，见 server/conversation.ts）
+    // 会话与 Provider 绑定：指纹不一致（换了 Provider，或改了它的协议/URL/模型）就开新会话，
+    // 避免把上一个 Provider 的协议原生历史发给新的上游。
+    //（服务端也有同样的协议保护：协议不一致时视为新会话，见 server/conversation.ts）
     let activeSessionId = sessionId
-    if (sessionProtocol !== null && sessionProtocol !== provider.protocol) {
+    const fingerprint = providerFingerprint(provider)
+    if (sessionProviderKey !== null && sessionProviderKey !== fingerprint) {
       activeSessionId = crypto.randomUUID()
       resetConversation(activeSessionId)
     }
-    setSessionProtocol(provider.protocol)
+    setSessionProviderKey(fingerprint)
 
     const userMessage: ChatMessage = { role: 'user', content: text }
     // 只把「这一句」发给 Server：会话历史由 Server 按 sessionId 持有、只追加不重建，
