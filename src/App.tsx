@@ -8,6 +8,7 @@ import { appendChunkText, appendRawEvent, emptyDelta, flushDeltaPending, renderD
 import { getProviders, getSelectedProviderId, saveProviders, saveSelectedProviderId, type Provider } from './config'
 import ProviderModal, { type ProviderDraft } from './ProviderModal'
 import LogBox from './components/LogBox'
+import MessageBubble, { type ChatMessage, type ToolCallInfo } from './components/MessageBubble'
 
 const { TextArea } = Input
 const { Text } = Typography
@@ -15,17 +16,9 @@ const { Text } = Typography
 // 最大生成 tokens 的默认值（16K）
 const DEFAULT_MAX_TOKENS = 16_384
 
-// 一次 Bash 工具调用的展示信息
-type ToolCallInfo = { name: string; input: { command: string; timeout?: number }; output: string; exitCode: number }
-
 // 一条来自 chat 响应的结构化事件（与 Server 的 ChatEvent 对齐）：
 // text = 文本增量；tool = 一次工具调用（含本地执行结果）
 type ChatEvent = { type: 'text'; delta: string } | { type: 'tool'; name: string; input: { command: string; timeout?: number }; output: string; exitCode: number }
-
-// 聊天消息结构：角色 + 内容；tool 类型用于展示工具调用（content 为空，细节在 toolInfo）
-// toolPhase 区分两条独立气泡：call = 模型发起的命令，result = 命令的执行结果
-// error：Chat 过程中（请求 / 流式）失败时插入的错误条目，按时间顺序排在聊天流里（不再用 Toast）
-type ChatMessage = { role: 'user' | 'assistant' | 'tool' | 'error'; content: string; toolInfo?: ToolCallInfo; toolPhase?: 'call' | 'result' }
 
 // 会话里的一条交互记录：请求/响应各带 HTTP 元信息与协议 JSON 正文
 type InteractionRecord = {
@@ -599,87 +592,10 @@ export default function App() {
                 <Text type="secondary">添加并选择一个 Provider 后，开始聊天吧</Text>
               </Flex>
             )}
-            {messages.map((m, i) => {
-              // 工具相关气泡：call = 模型发起的命令，result = 执行结果，两条独立气泡、样式区分
-              if (m.role === 'tool') {
-                const isCall = m.toolPhase === 'call'
-                const failed = !isCall && (m.toolInfo?.exitCode ?? 0) !== 0
-                const background = isCall ? '#f0f0f0' : failed ? '#fff1f0' : '#f6ffed'
-                const borderColor = isCall ? '#d9d9d9' : failed ? '#ffa39e' : '#b7eb8f'
-                return (
-                  // 方向对齐：tool call 靠左（模型发起），tool result 靠右（会被作为下一轮 request 发回模型）
-                  <Flex key={i} justify={isCall ? 'flex-start' : 'flex-end'} style={{ marginBottom: 10 }}>
-                    <Flex
-                      vertical
-                      style={{
-                        maxWidth: '85%',
-                        padding: '8px 12px',
-                        borderRadius: 8,
-                        background,
-                        border: `1px solid ${borderColor}`,
-                        fontFamily: 'Menlo, Consolas, monospace',
-                        fontSize: 12,
-                      }}
-                    >
-                      <Text type="secondary" style={{ fontSize: 11 }}>
-                        {isCall ? `🔧 tool call — ${m.toolInfo?.name}` : '↩ tool result'}
-                      </Text>
-                      {isCall ? (
-                        <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>$ {m.toolInfo?.input.command}</div>
-                      ) : (
-                        <>
-                          <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{m.toolInfo?.output}</div>
-                          <Text type="secondary" style={{ fontSize: 11, marginTop: 4 }}>
-                            exit code: {m.toolInfo?.exitCode}
-                          </Text>
-                        </>
-                      )}
-                    </Flex>
-                  </Flex>
-                )
-              }
-              // 错误条目：Chat 过程中（请求 / 流式）失败时插入，按时间顺序排在聊天流里
-              if (m.role === 'error') {
-                return (
-                  <Flex key={i} justify="center" style={{ marginBottom: 10 }}>
-                    <Flex
-                      vertical
-                      gap={2}
-                      style={{
-                        maxWidth: '85%',
-                        padding: '8px 12px',
-                        borderRadius: 8,
-                        background: '#fff1f0',
-                        border: '1px solid #ffa39e',
-                        color: '#a8071a',
-                        fontSize: 12,
-                      }}
-                    >
-                      <Text style={{ fontSize: 11, color: '#a8071a' }}>✕ error</Text>
-                      <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{m.content}</div>
-                    </Flex>
-                  </Flex>
-                )
-              }
-              return (
-                <Flex key={i} justify={m.role === 'user' ? 'flex-end' : 'flex-start'} style={{ marginBottom: 10 }}>
-                  <Flex
-                    style={{
-                      maxWidth: '70%',
-                      padding: '8px 12px',
-                      borderRadius: 8,
-                      background: m.role === 'user' ? '#1677ff' : '#ffffff',
-                      color: m.role === 'user' ? '#ffffff' : '#000000',
-                      whiteSpace: 'pre-wrap',
-                      wordBreak: 'break-word',
-                      boxShadow: '0 1px 2px rgba(0,0,0,0.1)',
-                    }}
-                  >
-                    {m.content || (i === messages.length - 1 && sending ? '…' : '')}
-                  </Flex>
-                </Flex>
-              )
-            })}
+            {messages.map((m, i) => (
+              // pending：列表最后一条且正在发送时，内容还空着就显示省略号
+              <MessageBubble key={i} message={m} pending={i === messages.length - 1 && sending} />
+            ))}
           </Flex>
           <Flex gap={8} style={{ marginTop: 8 }}>
             <TextArea
