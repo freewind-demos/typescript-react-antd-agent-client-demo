@@ -7,6 +7,7 @@ import { PROTOCOLS } from './protocols'
 import { appendChunkText, appendRawEvent, emptyDelta, flushDeltaPending, renderDeltaText, type DeltaState } from './delta'
 import { getProviders, getSelectedProviderId, saveProviders, saveSelectedProviderId, type Provider } from './config'
 import ProviderModal, { type ProviderDraft } from './ProviderModal'
+import LogBox from './components/LogBox'
 
 const { TextArea } = Input
 const { Text } = Typography
@@ -743,23 +744,9 @@ export default function App() {
                   children: (
                     <Flex vertical gap={8} style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
                       {/* Request 区：最新一次请求 */}
-                      <Flex vertical style={{ flex: 1, minWidth: 0, minHeight: 0, background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
-                        <Text type="secondary" style={{ fontSize: 11, marginBottom: 4 }}>
-                          Request（最新一次）
-                        </Text>
-                        <Flex vertical style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre' }}>
-                          {requestJsonc || '（暂无请求）'}
-                        </Flex>
-                      </Flex>
+                      <LogBox label="Request（最新一次）" text={requestJsonc} empty="（暂无请求）" wrap="pre" />
                       {/* Response 区：最新一次响应（流式已聚合为完整响应） */}
-                      <Flex vertical style={{ flex: 1, minWidth: 0, minHeight: 0, background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10 }}>
-                        <Text type="secondary" style={{ fontSize: 11, marginBottom: 4 }}>
-                          Response（最新一次，流式已聚合为完整响应）
-                        </Text>
-                        <Flex vertical style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre' }}>
-                          {responseJsonc || '（暂无响应）'}
-                        </Flex>
-                      </Flex>
+                      <LogBox label="Response（最新一次，流式已聚合为完整响应）" text={responseJsonc} empty="（暂无响应）" wrap="pre" />
                     </Flex>
                   ),
                 },
@@ -769,13 +756,7 @@ export default function App() {
                   label: '会话',
                   children: (
                     <Flex vertical gap={8} style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
-                      <Flex
-                        ref={jsonBoxRef}
-                        vertical
-                        style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre', wordBreak: 'break-all' }}
-                      >
-                        {sessionJsonText || '（暂无会话。这里以数组形式展示整个会话：一项 = 一个请求 + 一个回复，均为协议原生的 JSON）'}
-                      </Flex>
+                      <LogBox ref={jsonBoxRef} text={sessionJsonText} empty="（暂无会话。这里以数组形式展示整个会话：一项 = 一个请求 + 一个回复，均为协议原生的 JSON）" wrap="pre" />
                     </Flex>
                   ),
                 },
@@ -787,13 +768,7 @@ export default function App() {
                   label: 'delta',
                   children: (
                     <Flex vertical gap={8} style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
-                      <Flex
-                        ref={deltaBoxRef}
-                        vertical
-                        style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
-                      >
-                        {deltaText || '（暂无日志。与 raw 相同的内容，但以完整 SSE 事件（event: / data:）为单位展示，结构完全一致的连续事件合并成一条）'}
-                      </Flex>
+                      <LogBox ref={deltaBoxRef} text={deltaText} empty="（暂无日志。与 raw 相同的内容，但以完整 SSE 事件（event: / data:）为单位展示，结构完全一致的连续事件合并成一条）" />
                     </Flex>
                   ),
                 },
@@ -803,13 +778,7 @@ export default function App() {
                   label: 'raw',
                   children: (
                     <Flex vertical gap={8} style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
-                      <Flex
-                        ref={logBoxRef}
-                        vertical
-                        style={{ flex: 1, minWidth: 0, minHeight: 0, overflow: 'auto', background: '#111111', color: '#e6e6e6', borderRadius: 6, padding: 10, fontFamily: 'Menlo, Consolas, monospace', fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}
-                      >
-                        {logText || '（暂无日志。发送消息或 Fetch Models 后，这里会原样显示所有发出的请求与收到的响应，流式时每个 SSE 分片单独一条）'}
-                      </Flex>
+                      <LogBox ref={logBoxRef} text={logText} empty="（暂无日志。发送消息或 Fetch Models 后，这里会原样显示所有发出的请求与收到的响应，流式时每个 SSE 分片单独一条）" />
                     </Flex>
                   ),
                 },
