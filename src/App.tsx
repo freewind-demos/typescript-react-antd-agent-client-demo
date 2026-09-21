@@ -30,8 +30,6 @@ type ChatMessage = { role: 'user' | 'assistant' | 'tool' | 'error'; content: str
 type InteractionRecord = {
   request: { method: string; url: string; headers: Record<string, string>; body: unknown } | null
   response: { status: number; statusText: string; headers: Record<string, string>; body: unknown } | null
-  // 这一轮请求过程中触发的工具调用
-  tools?: ToolCallInfo[]
 }
 
 // headers 转成若干行注释文本
@@ -86,14 +84,7 @@ function renderInteractionJsonc(item: InteractionRecord): string {
         ...renderBodyFieldLines(item.response.body),
       ]
     : ['      null']
-  const hasTools = !!item.tools && item.tools.length > 0
-  const lines = ['  {', '    "request": {', ...requestLines, '    },', '    "response": {', ...responseLines, hasTools ? '    },' : '    }']
-  if (item.tools && item.tools.length > 0) {
-    // 工具调用以正常 JSON 字段附在 response 之后（含 command 入参与执行结果）
-    const toolsJson = JSON.stringify(item.tools, null, 2)
-    const toolsLines = toolsJson.split('\n').map((line, index) => (index === 0 ? line : `    ${line}`))
-    lines.push(`    "tools": ${toolsLines[0]}`, ...toolsLines.slice(1))
-  }
+  const lines = ['  {', '    "request": {', ...requestLines, '    },', '    "response": {', ...responseLines, '    }']
   lines.push('  }')
   return lines.join('\n')
 }
@@ -267,23 +258,9 @@ export default function App() {
           setSessionJson(patch)
           setCurrentPair((prev) => (prev ? { ...prev, response: { status: data.status, statusText: data.statusText, headers: data.headers ?? {}, body: prev.response?.body ?? null } } : prev))
         }
-        // 工具调用：只挂到日志面板的交互记录上（聊天区气泡由 chat 响应的事件流驱动，
-        // 见 applyChatEvent —— 日志 SSE 只服务右侧日志面板，不再影响聊天区）
-        if (data.type === 'tool') {
-          const toolCall: ToolCallInfo = { name: data.name, input: data.input, output: data.output, exitCode: data.exitCode }
-          const patchTools = (prev: InteractionRecord[]) => {
-            if (prev.length === 0) return prev
-            const next = [...prev]
-            const last = next[next.length - 1]
-            next[next.length - 1] = { ...last, tools: [...(last.tools ?? []), toolCall] }
-            return next
-          }
-          setSessionJson(patchTools)
-          setCurrentPair((prev) => (prev ? { ...prev, tools: [...(prev.tools ?? []), toolCall] } : prev))
-        }
-        // 聚合后的完整响应正文：更新最后一条交互的 response.body
-        if (data.currentResponse !== undefined && data.currentResponse !== null) {
-          const aggregated = data.currentResponse
+        // SDK 真实响应正文：更新最后一条交互的 response.body
+        if (data.responseBody !== undefined && data.responseBody !== null) {
+          const aggregated = data.responseBody
           const patch = (prev: InteractionRecord[]) => {
             if (prev.length === 0) return prev
             const next = [...prev]

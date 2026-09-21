@@ -2,7 +2,7 @@
 // 每个会话（sessionId）三份文件：
 //   logs/<sessionId>.log       —— 协议真实收发的原样日志（request / response / chunk / error；
 //                                 [TOOL] / [END] 等本地信息不写入）
-//   logs/<sessionId>.json      —— 整个会话的结构化 JSON（request 的 headers/body、response 的 status/headers、提取的回复文本）
+//   logs/<sessionId>.json      —— 整个会话的结构化 JSON（request 的 headers/body、response 的 status/headers、SDK 真实响应对象）
 //   logs/<sessionId>.delta.log —— 会话的 delta 日志（内容与前端 delta Tab 逐字一致，随事件整份重写）
 // 前端日志面板四个 Tab：请求/响应、会话、delta（与 raw 同源，但以完整 SSE 事件为单位、合并结构一致的连续事件）、raw（原样底层日志）。
 
@@ -11,7 +11,6 @@ import { join } from 'node:path'
 import type { LogEvent } from './middleware.js'
 import type { Protocol } from './clients.js'
 import { appendChunkText, appendRawEvent, emptyDelta, flushDeltaPending, renderDeltaText, type DeltaState } from '../delta.js'
-import { mergeChatCompletionDelta } from './chatCompletionDelta.js'
 
 // 日志目录：项目根下的 logs/（已在 .gitignore 忽略）
 export const LOGS_DIR = join(process.cwd(), 'logs')
@@ -19,8 +18,17 @@ export const LOGS_DIR = join(process.cwd(), 'logs')
 // 一个订阅中的 SSE 客户端：用 send 推数据
 type SseClient = { send: (text: string) => void }
 
-// 把一条日志事件格式化成 verbose 文本（原样展示，区分方向）
-export function formatLogEvent(event: LogEvent): string {
+// 协议真实收发的事件：request / response / chunk / error / end（HTTP 层）。
+// SDK 响应对象（sdk-response）不属于 HTTP 层，不进 verbose 日志。
+export type ProtocolLogEvent = Extract<LogEvent, { type: 'request' | 'response' | 'chunk' | 'error' | 'end' }>
+
+// 判断一条日志事件是否属于协议真实收发（verbose 日志只记录这些）
+function isProtocolEvent(event: LogEvent): event is ProtocolLogEvent {
+  return event.type === 'request' || event.type === 'response' || event.type === 'chunk' || event.type === 'error'
+}
+
+// 把一条协议日志事件格式化成 verbose 文本（原样展示，区分方向）
+export function formatLogEvent(event: ProtocolLogEvent): string {
   const time = new Date(event.timestamp).toISOString()
   switch (event.type) {
     case 'request': {
@@ -37,17 +45,7 @@ export function formatLogEvent(event: LogEvent): string {
       return `=== [ERROR] @ ${time} ===\n${event.message}`
     case 'end':
       return `=== [END] @ ${time} ===`
-    case 'tool':
-      return `=== [TOOL] ${event.name} @ ${time} ===\nInput: ${JSON.stringify(event.input)}\nExit code: ${event.exitCode}\nOutput:\n${event.output}`
   }
-}
-
-// 只有"协议真实收发"的事件才进日志视图：
-// request / response / chunk / error 是协议层的数据；
-// [TOOL]（本地 bash 执行结果，本地合成）与 [END]（本地结束标记）是本地/辅助信息，
-// 不进日志，避免误导 —— 这个 Client 的目的就是看清协议"发了什么、收了什么"。
-function isProtocolEvent(event: LogEvent): boolean {
-  return event.type === 'request' || event.type === 'response' || event.type === 'chunk' || event.type === 'error'
 }
 
 // 从一条原始文本里提取协议原生的 JSON：请求体（整段 JSON）或响应事件（每个 data: 行的 JSON）。
@@ -74,157 +72,16 @@ function extractProtocolJsons(raw: string): unknown[] {
   return result
 }
 
-// 把「按网络分块到达的响应文本」解析成协议 JSON，返回本次能完整解析出的部分 + 还没收完的尾巴。
-//
-// 为什么需要它：TCP 分块边界与 SSE 事件边界无关，一个大 JSON（Responses 的 response.completed、
-// 非流式的整个响应体）常常被切成几段。逐块独立 JSON.parse 会把它们整段静默丢掉 —— 日志面板上
-// 表现为响应体是 null 或某个半截事件。
-function takeResponseEvents(text: string, isSse: boolean, force = false): { events: unknown[]; rest: string } {
-  if (!isSse) {
-    // 非流式：整个响应体是一个 JSON，完整了才能解析（没完整就留着，等后面的分块）
-    try {
-      return { events: [JSON.parse(text)], rest: '' }
-    } catch {
-      return { events: [], rest: force ? '' : text }
-    }
-  }
-  // 流式：SSE 事件以空行分隔，只解析已经收到完整空行的事件（force=true 时连尾巴一起试）
-  const boundary = force ? text.length : text.lastIndexOf('\n\n')
-  if (boundary < 0) return { events: [], rest: text }
-  const events: unknown[] = []
-  for (const line of text.slice(0, boundary).split('\n')) {
-    if (!line.startsWith('data: ')) continue
-    const payload = line.slice(6).trim()
-    // SSE 结束标记不是协议内容
-    if (payload === '' || payload === '[DONE]') continue
-    try {
-      events.push(JSON.parse(payload))
-    } catch {
-      // 无法解析的行跳过
-    }
-  }
-  return { events, rest: text.slice(boundary + 2) }
-}
-
-// 把一次响应的所有事件聚合成"完整响应对象"（会话 JSON 里展示用）：
-// 流式响应把文本增量拼完整、补齐结束原因等；非流式响应直接就是完整对象。
-function aggregateResponse(protocol: Protocol, events: unknown[]): unknown {
-  if (events.length === 0) return null
-  const list = events as Array<Record<string, any>>
-
-  if (protocol === 'anthropic-messages') {
-    // 流式：以 message_start 的 message 为骨架，按 content block index 聚合各块
-    // （text / thinking / tool_use 等通通保留，不只取 text），再补 message_delta 的停止原因与用量
-    const start = list.find((e) => e.type === 'message_start')
-    if (!start) return events[0] // 非流式响应：本身就是完整对象
-    const blocks: Record<number, Record<string, any>> = {}
-    for (const e of list) {
-      if (e.type === 'content_block_start') {
-        blocks[e.index] = { ...(e.content_block ?? {}) }
-      } else if (e.type === 'content_block_delta') {
-        const block = blocks[e.index] ?? (blocks[e.index] = {})
-        const d = e.delta ?? {}
-        if (d.type === 'text_delta') {
-          block.type = 'text'
-          block.text = (block.text ?? '') + d.text
-        } else if (d.type === 'thinking_delta') {
-          block.type = 'thinking'
-          block.thinking = (block.thinking ?? '') + d.thinking
-        } else if (d.type === 'signature_delta') {
-          block.signature = (block.signature ?? '') + d.signature
-        } else if (d.type === 'input_json_delta') {
-          block.type = 'tool_use'
-          block.__partialJson = (block.__partialJson ?? '') + d.partial_json
-        } else if (d.type === 'citations_delta') {
-          const citations = block.citations ?? (block.citations = [])
-          citations.push(d.citation)
-        }
-      } else if (e.type === 'content_block_stop') {
-        // 工具调用的参数是分片 JSON，这里解析回对象
-        const block = blocks[e.index]
-        if (block && typeof block.__partialJson === 'string') {
-          try {
-            block.input = JSON.parse(block.__partialJson)
-          } catch {
-            block.input = block.__partialJson
-          }
-          delete block.__partialJson
-        }
-      }
-    }
-    const content = Object.keys(blocks)
-      .map(Number)
-      .sort((a, b) => a - b)
-      .map((index) => blocks[index])
-    const deltaEvent = list.find((e) => e.type === 'message_delta')
-    return {
-      ...(start.message ?? {}),
-      content,
-      stop_reason: deltaEvent?.delta?.stop_reason ?? null,
-      stop_sequence: deltaEvent?.delta?.stop_sequence ?? null,
-      ...(deltaEvent?.usage ? { usage: deltaEvent.usage } : {}),
-    }
-  }
-
-  if (protocol === 'openai-chat-completions') {
-    // 非流式：object 为 chat.completion
-    if (list[0]?.object !== 'chat.completion.chunk') return events[0]
-    // 通用合并（与客户端回放同一份实现，见 chatCompletionDelta.ts）：delta 里所有字段都保留——
-    // 字符串字段拼接、tool_calls 按 index 归并（arguments 是分片 JSON 必须拼接）、其余取非空值
-    const message: Record<string, unknown> = {}
-    for (const c of list) {
-      const delta = c.choices?.[0]?.delta
-      if (!delta) continue
-      mergeChatCompletionDelta(message, delta)
-    }
-    // 协议要求 message 必须带 role
-    if (message.role == null) {
-      message.role = 'assistant'
-    }
-    const finishEvent = [...list].reverse().find((c) => c.choices?.[0]?.finish_reason)
-    const usageEvent = [...list].reverse().find((c) => c.usage)
-    const first = list[0]
-    return {
-      id: first.id,
-      object: 'chat.completion',
-      created: first.created,
-      model: first.model,
-      choices: [{ index: 0, message, finish_reason: finishEvent?.choices?.[0]?.finish_reason ?? null }],
-      ...(usageEvent?.usage ? { usage: usageEvent.usage } : {}),
-    }
-  }
-
-  // openai-responses：完成事件里带完整 response，直接用它
-  const completed = list.find((e) => e.type === 'response.completed')
-  if (completed?.response) return completed.response
-  const created = list.find((e) => e.type === 'response.created')
-  if (!created) return events[0] // 非流式响应
-  // 流被中断（没有 response.completed）：用已完成的 output item 组装，并附上已收到的文本
-  const doneItems = list.filter((e) => e.type === 'response.output_item.done').map((e) => e.item)
-  const text = list.filter((e) => e.type === 'response.output_text.delta').map((e) => e.delta as string).join('')
-  return { ...(created.response ?? {}), status: 'incomplete', output: doneItems, output_text: text }
-}
-
 // 会话里的一条交互记录：请求/响应各带 HTTP 元信息与协议 JSON 正文
 // （元信息用于 Tab1 生成 JSONC 注释；正文是协议原生 JSON）
 export type InteractionRecord = {
   request: { method: string; url: string; headers: Record<string, string>; body: unknown } | null
   response: { status: number; statusText: string; headers: Record<string, string>; body: unknown } | null
-  // 这一轮请求过程中触发的工具调用（本地 Bash 执行结果）
-  tools?: Array<{ name: string; input: { command: string; timeout?: number }; output: string; exitCode: number }>
 }
 
-// 会话状态：交互列表（一个请求配一个回复）+ 当前响应的已收事件
+// 会话状态：交互列表（一个请求配一个回复）+ delta 累积
 type SessionState = {
   interactions: InteractionRecord[]
-  // 当前正在累积的响应事件
-  events: unknown[]
-  // 当前响应已收到的原始文本（网络分块边界不可靠，必须自己拼回完整事件再解析）
-  pendingText: string
-  // 当前响应是不是 SSE（由响应头的 content-type 判定）
-  pendingIsSse: boolean
-  // 当前请求使用的协议（聚合时用）
-  protocol: Protocol | undefined
   // 会话的 delta 状态（与前端 delta Tab 同规则累积，落盘到 <sessionId>.delta.log）
   delta: DeltaState
 }
@@ -262,64 +119,38 @@ export class LogManager {
       writeFileSync(filePath, `${formatLogEvent(event)}\n\n`, { flag: 'a' })
     }
 
-    // ---- 收集本次事件里的协议原生 JSON ----
-    // 请求事件：请求体就是协议 JSON；chunk 事件：响应里每个 data: 行是协议事件 JSON
+    // ---- 收集本次事件里的协议原生信息 ----
+    // 请求事件：请求体就是协议 JSON；sdk-response 事件：SDK 解析出的完整响应对象
     let requestJson: unknown
-    let currentResponse: unknown
-    const state = this.sessionStates[sessionId] ?? (this.sessionStates[sessionId] = { interactions: [], events: [], pendingText: '', pendingIsSse: false, protocol: undefined, delta: emptyDelta() })
+    let responseBody: unknown
+    const state = this.sessionStates[sessionId] ?? (this.sessionStates[sessionId] = { interactions: [], delta: emptyDelta() })
 
-    // 把解析出来的响应事件并入当前交互：更新聚合正文并落盘
-    const commitResponseEvents = (evs: unknown[]): void => {
-      if (evs.length === 0) return
-      state.events.push(...evs)
-      currentResponse = aggregateResponse(state.protocol ?? 'openai-chat-completions', state.events)
+    if (event.type === 'request') {
+      // 新的一次交互开始：记录请求元信息与请求体（协议 JSON）
+      const parsed = extractProtocolJsons(event.bodyText)
+      requestJson = parsed[0] ?? null
+      state.interactions.push({ request: { method: event.method, url: event.url, headers: event.headers, body: requestJson }, response: null })
+      this.writeJsonFile(sessionId, state)
+    } else if (event.type === 'response') {
+      // 收到响应头：记录状态与 headers（正文等 SDK 响应对象）
+      const last = state.interactions[state.interactions.length - 1]
+      if (last) {
+        last.response = { status: event.status, statusText: event.statusText, headers: event.headers, body: last.response?.body ?? null }
+      }
+      this.writeJsonFile(sessionId, state)
+    } else if (event.type === 'sdk-response') {
+      // SDK 解析出的完整响应：作为这次交互的真实响应正文
       const last = state.interactions[state.interactions.length - 1]
       if (last) {
         last.response = {
           status: last.response?.status ?? 0,
           statusText: last.response?.statusText ?? '',
           headers: last.response?.headers ?? {},
-          body: currentResponse,
+          body: event.body,
         }
       }
+      responseBody = event.body
       this.writeJsonFile(sessionId, state)
-    }
-
-    if (event.type === 'request') {
-      // 新的一次交互开始：记录请求元信息与请求体，重置当前响应事件
-      const parsed = extractProtocolJsons(event.bodyText)
-      requestJson = parsed[0] ?? null
-      state.events = []
-      state.pendingText = ''
-      state.pendingIsSse = false
-      state.protocol = _protocol
-      state.interactions.push({ request: { method: event.method, url: event.url, headers: event.headers, body: requestJson }, response: null })
-      this.writeJsonFile(sessionId, state)
-    } else if (event.type === 'response') {
-      // 收到响应头：记录状态与 headers（正文等 chunk 聚合），并记下这是不是 SSE 响应
-      const contentType = Object.entries(event.headers).find(([k]) => k.toLowerCase() === 'content-type')?.[1] ?? ''
-      state.pendingIsSse = contentType.includes('text/event-stream')
-      const last = state.interactions[state.interactions.length - 1]
-      if (last) {
-        last.response = { status: event.status, statusText: event.statusText, headers: event.headers, body: last.response?.body ?? null }
-      }
-      this.writeJsonFile(sessionId, state)
-    } else if (event.type === 'tool') {
-      // 工具调用：挂到最近一次交互记录上（这一轮请求触发的本地 Bash 执行）
-      const last = state.interactions[state.interactions.length - 1]
-      if (last) {
-        last.tools = [...(last.tools ?? []), { name: event.name, input: event.input, output: event.output, exitCode: event.exitCode }]
-      }
-      this.writeJsonFile(sessionId, state)
-    } else if (event.type === 'chunk') {
-      // 网络分块边界与协议事件边界无关：先累积原始文本，只解析「已经收完整」的部分，
-      // 剩下的尾巴留到后续分块（响应结束时再强制解析一次）
-      state.pendingText += event.text
-      // content-type 缺失时按 `data: ` 前缀兜底识别 SSE
-      const isSse = state.pendingIsSse || state.pendingText.trimStart().startsWith('data:')
-      const { events: evs, rest } = takeResponseEvents(state.pendingText, isSse)
-      state.pendingText = rest
-      commitResponseEvents(evs)
     }
 
     // ---- 同步 Delta 日志：内容与前端 delta Tab 完全一致 ----
@@ -329,13 +160,6 @@ export class LogManager {
       state.delta = appendChunkText(state.delta, event.timestamp, event.text)
       this.writeDeltaFile(sessionId, state)
     } else if (event.type === 'end' || event.type === 'error') {
-      // 响应结束：把缓冲里最后没切完的尾巴强制解析一次（不完整的 JSON 解析失败即丢）
-      if (state.pendingText) {
-        const isSse = state.pendingIsSse || state.pendingText.trimStart().startsWith('data:')
-        const { events: evs } = takeResponseEvents(state.pendingText, isSse, true)
-        state.pendingText = ''
-        commitResponseEvents(evs)
-      }
       state.delta = flushDeltaPending(state.delta, event.timestamp)
       if (isProtocolEvent(event)) state.delta = appendRawEvent(state.delta, formatLogEvent(event))
       this.writeDeltaFile(sessionId, state)
@@ -345,10 +169,9 @@ export class LogManager {
     }
 
     // ---- 广播给前端：SSE 格式 data: JSON\n\n ----
-    // text 只给协议事件（前端据此追加日志视图；[TOOL] 等不带 text，因此不会出现在日志里，
-    // 但事件本身照常广播，供 Chat 面板渲染工具气泡）；
+    // text 只给协议事件（前端据此追加日志视图）；requestJson / responseBody 用于更新日志面板的交互记录；
     // chunkText 只给 chunk 事件，供前端 delta Tab 按 SSE 事件边界自行累积
-    const payload = `data: ${JSON.stringify({ ...event, text: isProtocolEvent(event) ? formatLogEvent(event) : undefined, requestJson, currentResponse, chunkText: event.type === 'chunk' ? event.text : undefined, sessionId })}\n\n`
+    const payload = `data: ${JSON.stringify({ ...event, text: isProtocolEvent(event) ? formatLogEvent(event) : undefined, requestJson, responseBody, chunkText: event.type === 'chunk' ? event.text : undefined, sessionId })}\n\n`
     for (const client of this.subscribers) {
       client.send(payload)
     }

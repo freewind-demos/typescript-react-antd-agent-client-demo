@@ -14,8 +14,9 @@ export type LogEvent =
   | { type: 'error'; message: string; timestamp: number }
   // 响应体读取完毕
   | { type: 'end'; timestamp: number }
-  // 工具调用：本地执行 Bash 命令的入参与结果（不属于 HTTP 层，但同属过程日志）
-  | { type: 'tool'; name: string; input: { command: string; timeout?: number }; output: string; exitCode: number; timestamp: number }
+  // SDK 解析出的完整响应对象：不属于 HTTP 层，而是本次交互的「真实响应正文」
+  //（非流式即上游返回的完整对象；流式为 SDK 恢复出的完整消息，如 Anthropic 的 finalMessage）
+  | { type: 'sdk-response'; body: unknown; timestamp: number }
 
 // 我们自己用的 fetch 函数签名（与 SDK 内部 Fetch 类型一致）
 export type LoggingFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>

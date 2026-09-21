@@ -74,22 +74,14 @@ function parseToolArgs(json: string): unknown {
 }
 
 // 按 Bash 工具约定执行命令：command 缺失/非法时直接返回错误结果，不真正执行。
-// 无论成功与否都触发一条 tool 事件（用于日志面板）；规范化后的入参随返回值交给聊天事件。
-async function runBashTool(input: unknown, onEvent: (event: LogEvent) => void): Promise<{ input: ToolInput; result: BashResult }> {
+// 规范化后的入参随返回值交给聊天事件（工具气泡由 chat 事件流驱动，不再走日志）。
+async function runBashTool(input: unknown): Promise<{ input: ToolInput; result: BashResult }> {
   const { command, timeout } = (input ?? {}) as { command?: unknown; timeout?: unknown }
   const normalized: ToolInput = { command: typeof command === 'string' ? command : String(command ?? ''), ...(typeof timeout === 'number' ? { timeout } : {}) }
   const validCommand = typeof command === 'string' && command.trim() !== ''
   const result: BashResult = validCommand
     ? await executeBash({ command: command as string, timeout: typeof timeout === 'number' ? timeout : undefined })
     : { output: 'error: the "command" argument is required and must be a non-empty string', exitCode: -1, truncated: false }
-  onEvent({
-    type: 'tool',
-    name: BASH_TOOL_NAME,
-    input: normalized,
-    output: result.output,
-    exitCode: result.exitCode,
-    timestamp: Date.now(),
-  })
   return { input: normalized, result }
 }
 
@@ -149,6 +141,10 @@ async function* agentLoop<T>(req: ChatRequest, adapter: ProtocolAdapter<T>): Asy
     }
     if (res === undefined) throw new Error('upstream returned no response')
 
+    // SDK 解析出的完整响应：作为这次 HTTP 交互的真实响应正文交给日志层
+    //（非流式即上游完整对象；流式为 SDK 恢复出的完整消息）
+    req.onEvent({ type: 'sdk-response', body: res, timestamp: Date.now() })
+
     const tools = adapter.extractTools(res)
     if (tools.length === 0) {
       // 拿到最终回答：到这一刻才把整轮历史提交回会话
@@ -158,7 +154,7 @@ async function* agentLoop<T>(req: ChatRequest, adapter: ProtocolAdapter<T>): Asy
     // 按模型给出的顺序逐个执行（不并行），结果与调用一一对应
     const results: ToolResult[] = []
     for (const tool of tools) {
-      const { input, result } = await runBashTool(tool.input, req.onEvent)
+      const { input, result } = await runBashTool(tool.input)
       // 工具事件就地插进事件流：前端在正确位置渲染工具气泡，并另起助手气泡接续后续文本
       yield { type: 'tool', name: BASH_TOOL_NAME, input, output: result.output, exitCode: result.exitCode }
       results.push({ key: tool.key, output: formatBashResult(result) })
