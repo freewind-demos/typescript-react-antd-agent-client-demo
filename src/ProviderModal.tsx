@@ -87,7 +87,7 @@ export default function ProviderModal({
 
   return (
     <Modal open={open} title={initial ? '编辑 Provider' : '添加 Provider'} okText="保存" cancelText="取消" onOk={submit} onCancel={onCancel}>
-      <Space direction="vertical" size="small" style={{ width: '100%', marginTop: 8 }}>
+      <Space orientation="vertical" size="small" style={{ width: '100%', marginTop: 8 }}>
         {/* 协议：切换后清空已拉取的模型（不同协议模型不通用） */}
         <Select
           value={protocol}
