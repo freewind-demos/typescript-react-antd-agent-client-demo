@@ -25,6 +25,12 @@ export type ChatResult =
   | { stream: false; text: string }
   | { stream: true; iterator: AsyncIterable<string> }
 
+// Chat Completions 的扩展字段（DeepSeek 等上游在 delta / message 上额外返回 reasoning_content = 思维链）。
+// OpenAI SDK 类型未收录该字段，这里补一层；回放历史时原样带回，保证"收到什么就回什么"。
+type ChatCompletionDelta = OpenAI.Chat.Completions.ChatCompletionChunk.Choice.Delta
+type ChatCompletionDeltaWithReasoning = ChatCompletionDelta & { reasoning_content?: string | null }
+type ChatCompletionAssistantMessage = OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam & { reasoning_content?: string }
+
 // 按协议创建 SDK 客户端，注入日志 fetch
 function createClient(protocol: Protocol, baseUrl: string, apiKey: string, onEvent: (event: LogEvent) => void): Anthropic | OpenAI {
   // 包装全局 fetch：所有经 SDK 发出的 HTTP 请求都会先经过日志中间件
@@ -216,22 +222,25 @@ async function chatWithOpenAiChat(req: ChatRequest): Promise<ChatResult> {
     for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
       const res = await client.chat.completions.create({ model: req.model, messages, tools })
       const message = res.choices[0]?.message
+      // 上游若返回思维链（reasoning_content），原样留着，回放时一并带回
+      const reasoningContent = (message as ChatCompletionAssistantMessage | undefined)?.reasoning_content
       // 只处理标准 function 调用（本 demo 不使用 custom tool）
       const toolCalls = (message?.tool_calls ?? []).filter((call) => call.type === 'function')
       // 本轮没有工具调用：即为最终回答
       if (toolCalls.length === 0) {
         return { stream: false, text: message?.content ?? '' }
       }
-      // 回放 assistant 消息（含 tool_calls），再把每个工具结果以 role:'tool' 消息回传
+      // 回放 assistant 消息（含 reasoning_content + tool_calls），再把每个工具结果以 role:'tool' 消息回传
       messages.push({
         role: 'assistant',
         content: message?.content ?? null,
+        ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
         tool_calls: toolCalls.map((call) => ({
           id: call.id,
           type: 'function' as const,
           function: { name: call.function.name, arguments: call.function.arguments },
         })),
-      })
+      } as ChatCompletionAssistantMessage)
       for (const call of toolCalls) {
         const result = await runBashTool(parseToolArgs(call.function.arguments), req.onEvent)
         messages.push({ role: 'tool', tool_call_id: call.id, content: formatBashResult(result) })
@@ -246,12 +255,15 @@ async function chatWithOpenAiChat(req: ChatRequest): Promise<ChatResult> {
     iterator: (async function* () {
       for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
         const stream = await client.chat.completions.create({ model: req.model, messages, tools, stream: true })
-        // 累积本轮：content 文本 + tool_calls（分数片，按 index 归位）
+        // 累积本轮：reasoning_content（思维链）+ content 文本 + tool_calls（分数片，按 index 归位）
         let content = ''
+        let reasoningContent = ''
         const toolCalls = new Map<number, { id: string; name: string; args: string }>()
         for await (const chunk of stream) {
-          const delta = chunk.choices[0]?.delta
+          const delta = chunk.choices[0]?.delta as ChatCompletionDeltaWithReasoning | undefined
           if (!delta) continue
+          // 思维链增量（DeepSeek 等上游）：累积用于回放，不推给前端聊天区
+          if (delta.reasoning_content) reasoningContent += delta.reasoning_content
           // 文本增量：累积用于回放，同时立即 yield 给前端（打字机效果）
           if (delta.content) {
             content += delta.content
@@ -273,16 +285,17 @@ async function chatWithOpenAiChat(req: ChatRequest): Promise<ChatResult> {
         // 本轮无工具调用：整个 agent loop 结束
         if (toolCalls.size === 0) return
         const ordered = [...toolCalls.entries()].sort((a, b) => a[0] - b[0]).map(([, value]) => value)
-        // 回放 assistant 消息（含 tool_calls），再执行工具并把结果作为 role:'tool' 消息
+        // 回放 assistant 消息（含 reasoning_content + tool_calls），再执行工具并把结果作为 role:'tool' 消息
         messages.push({
           role: 'assistant',
           content: content || null,
+          ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
           tool_calls: ordered.map((call) => ({
             id: call.id,
             type: 'function' as const,
             function: { name: call.name, arguments: call.args },
           })),
-        })
+        } as ChatCompletionAssistantMessage)
         for (const call of ordered) {
           const result = await runBashTool(parseToolArgs(call.args), req.onEvent)
           messages.push({ role: 'tool', tool_call_id: call.id, content: formatBashResult(result) })
