@@ -347,20 +347,8 @@ export default function App() {
       return
     }
     const userMessage: ChatMessage = { role: 'user', content: text }
-    // 发给 Server 的历史：过滤掉 tool / error 条目（Server 只认 user/assistant/system），
-    // 并合并连续的同角色消息、丢弃空内容 —— 工具调用点会把助手气泡切成多段
-    //（preamble / 最终回答），这里合并回单条，避免上游因角色不交替而报错
-    const history: Array<{ role: 'user' | 'assistant'; content: string }> = []
-    for (const m of messages) {
-      if (m.role === 'tool' || m.role === 'error' || !m.content) continue
-      const prev = history[history.length - 1]
-      if (prev && prev.role === m.role) {
-        prev.content += m.content
-      } else {
-        history.push({ role: m.role, content: m.content })
-      }
-    }
-    const requestMessages = [...history, { role: 'user' as const, content: text }]
+    // 只把「这一句」发给 Server：会话历史由 Server 按 sessionId 持有、只追加不重建，
+    // 前端不再自己拼接/合并历史（那样会改写报文，丢掉 tool_calls / thinking 等字段）。
     // 聊天区追加用户消息与空的助手气泡（流式时逐段填充；工具气泡会在调用点按真实时序插入，
     // 并在其后新起助手气泡接续后续回答）
     setMessages((prev) => [...prev, userMessage, { role: 'assistant', content: '' }])
@@ -370,7 +358,7 @@ export default function App() {
       const res = await fetch(meta.chatEndpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ baseUrl: provider.baseUrl, apiKey: provider.apiKey, model: provider.model, messages: requestMessages, stream, sessionId }),
+        body: JSON.stringify({ baseUrl: provider.baseUrl, apiKey: provider.apiKey, model: provider.model, text, stream, sessionId }),
       })
       if (!res.ok) {
         const data = await res.json().catch(() => null)
