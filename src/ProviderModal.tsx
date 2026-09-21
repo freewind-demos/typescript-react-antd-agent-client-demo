@@ -100,6 +100,8 @@ export default function ProviderModal({
           style={{ width: '100%' }}
         />
         <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="API URL" />
+        {/* 【已知取舍 · Demo 不修】API Key 用普通文本框明文显示（Provider 列表里也明文）。
+            原因：本地调试工具，方便核对；要修可改 type="password"。 */}
         <Input value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="API Key" />
         <Flex gap={8}>
           <AutoComplete

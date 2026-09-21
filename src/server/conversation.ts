@@ -17,6 +17,14 @@ export type Conversation = {
 
 export class ConversationStore {
   // 进程内保存，不落盘：服务重启即清空
+  //
+  // 【已知取舍 · Demo 不修】下面两种情况都不处理：
+  // 1) 没有清理策略 —— 新建会话（前端换 sessionId）后旧会话的历史仍留在内存里，频繁新建会持续增长
+  //    直到服务重启。
+  // 2) 同一个 sessionId 并发两个请求 —— agent loop 各自复制历史、完成时整体覆盖
+  //    （clients.ts 里的 req.conversation.messages = working），后完成者覆盖先完成者，历史会丢。
+  // 原因：本地 Demo 短时运行、重启即清空；正常 UI 已用 sending 阻止重复发送，
+  // 只有脚本直接调接口或多标签页复用同一 ID 才可能触发。
   private conversations = new Map<string, Conversation>()
 
   // 取会话；协议不一致时视为新会话（清空重来），避免把 A 协议的报文发给 B 协议

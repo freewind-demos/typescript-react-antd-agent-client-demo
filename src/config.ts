@@ -1,6 +1,7 @@
 // LocalStorage 持久化：只保存"最终结果"——Provider 列表 + 当前选中的 Provider。
 //（早期按 URL / Key / 模型分别记历史下拉的做法已废弃，不再保留。）
-// 注意：API Key 是明文存在浏览器 LocalStorage 里（本 demo 为本地调试工具，接受此风险）。
+// 【已知取舍 · Demo 不修】API Key 明文存在浏览器 LocalStorage 里，Provider 列表与编辑弹窗也明文显示。
+// 原因：本 demo 是本地调试工具，方便一眼核对 Key；要修可改为掩码显示 + 密码输入框 + 不落盘。
 
 import type { Protocol } from './protocols'
 

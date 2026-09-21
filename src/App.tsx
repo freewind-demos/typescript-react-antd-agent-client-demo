@@ -218,6 +218,9 @@ export default function App() {
   }, [sessionId])
 
   // 订阅实时日志流：只追加当前会话的事件（换会话后 EventSource 重建）
+  // 【已知取舍 · Demo 不修】服务端是广播全量会话事件的，这里才按 sessionId 过滤；
+  // 所以本页也会收到（并丢弃）其他会话的完整请求头与响应，浪费流量且扩大敏感信息暴露面。
+  // 原因：Demo 通常只开一个页面；要修需订阅时把 sessionId 带给服务端，由服务端只推对应会话。
   useEffect(() => {
     const es = new EventSource('/api/logs/stream')
     es.onmessage = (event) => {
@@ -533,6 +536,8 @@ export default function App() {
                     <span style={{ color: selected ? '#1677ff' : '#bfbfbf' }}>{selected ? '●' : '○'}</span>
                     <Flex vertical style={{ flex: 1, minWidth: 0 }}>
                       <span style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.model || '（未填模型）'}</span>
+                      {/* 【已知取舍 · Demo 不修】这里明文显示完整 API Key（编辑弹窗也是普通文本框）。
+                          原因：本地调试工具，方便一眼核对；要修可掩码显示 + 密码框。 */}
                       <span style={{ fontSize: 11, color: '#8c8c8c', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {protocolLabel} · {p.baseUrl} · {p.apiKey}
                       </span>

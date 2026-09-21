@@ -89,10 +89,15 @@ type SessionState = {
 // 日志管理器：维护会话的 verbose 文件、协议 JSON（内存 + 落盘）与 SSE 订阅者
 export class LogManager {
   // 每个 sessionId 对应的 verbose 文件路径
+  // 【已知取舍 · Demo 不修】下面三张表都用普通对象按外部传入的 sessionId 索引：
+  // 传 "__proto__" 这类特殊键会命中原型链上的值（?? 兜不住），随后读属性就会异常。
+  // 原因：正常 UI 用 crypto.randomUUID()，不会触发；要修可换 Map 或校验 sessionId 必须是 UUID。
   private filePaths: Record<string, string> = {}
   // 每个 sessionId 对应的 JSON 文件路径
   private jsonPaths: Record<string, string> = {}
   // 每个 sessionId 的会话状态（协议 JSON：交互列表 + 当前响应事件累积）
+  // 【已知取舍 · Demo 不修】只增不删：新建会话不会清掉旧会话的交互记录与 delta，内存持续增长到重启。
+  // 原因：本地 Demo 短时运行、重启即清空。
   private sessionStates: Record<string, SessionState> = {}
   // 当前在线的 SSE 订阅者
   private subscribers = new Set<SseClient>()
@@ -102,11 +107,17 @@ export class LogManager {
   }
 
   // 把任意 sessionId 规整成安全文件名（防止路径穿越）
+  // 【已知取舍 · Demo 不修】非法字符被统一换成 _，不同 sessionId 会映射到同一文件名
+  //（a/b 与 a?b 都变成 a_b），理论上两份日志会互相覆盖。
+  // 原因：正常 UI 用 UUID，不会碰撞；要修可用哈希文件名，或只接受 UUID。
   private safeName(sessionId: string): string {
     return sessionId.replace(/[^a-zA-Z0-9_-]/g, '_')
   }
 
   // 某个会话追加一条日志事件：更新原样日志文件与协议 JSON，并广播给所有订阅者
+  // 【已知取舍 · Demo 不修】每次调用都同步写盘，而且 delta 文件与交互 JSON 是整份重写：
+  // 流式时每个 chunk 都要重写一次越来越大的文件（整体接近 O(n^2)），长会话可能拖慢流式输出。
+  // 原因：Demo 日志量小、会话短；要修可改增量追加或节流批量异步写。
   append(sessionId: string, event: LogEvent, _protocol?: Protocol): void {
     // ---- 原样日志（仅协议真实收发的事件；[TOOL] / [END] 是本地信息，不写入）----
     if (isProtocolEvent(event)) {
@@ -171,6 +182,8 @@ export class LogManager {
     // ---- 广播给前端：SSE 格式 data: JSON\n\n ----
     // text 只给协议事件（前端据此追加日志视图）；requestJson / responseBody 用于更新日志面板的交互记录；
     // chunkText 只给 chunk 事件，供前端 delta Tab 按 SSE 事件边界自行累积
+    // 【已知取舍 · Demo 不修】这里不按 sessionId 分流，带完整 headers 与响应正文的 payload 会发给所有订阅者，
+    // 由前端自己过滤。原因：Demo 通常只开一个页面，详见 app.ts 中 /api/logs/stream 的说明。
     const payload = `data: ${JSON.stringify({ ...event, text: isProtocolEvent(event) ? formatLogEvent(event) : undefined, requestJson, responseBody, chunkText: event.type === 'chunk' ? event.text : undefined, sessionId })}\n\n`
     for (const client of this.subscribers) {
       client.send(payload)

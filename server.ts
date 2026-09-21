@@ -6,6 +6,9 @@ import { buildApp } from './src/server/app'
 
 const PORT = 3001
 
+// 【已知取舍 · Demo 不修】没有显式绑定 127.0.0.1，也没有鉴权与 Origin 校验：
+// 同网段的其他设备能访问 /api/*，而该接口可以通过模型间接在本机执行 Bash。
+// 原因：这是本地 Demo，只在本机短时运行；要加固需绑定回环 + Origin 校验 + 本地令牌。
 buildApp().listen(PORT, () => {
   console.log(`Agent Client server listening on http://localhost:${PORT}`)
 })

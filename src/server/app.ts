@@ -17,6 +17,9 @@ const logManager = new LogManager()
 const conversationStore = new ConversationStore()
 
 // 通用聊天 handler：按协议分发，日志事件绑定到请求里的 sessionId
+// 【已知取舍 · Demo 不修】没有监听连接关闭（req.on('close')），也没有把取消信号透传给 SDK 请求与 Bash 子进程：
+// 浏览器刷新 / 关闭页面后，上游生成与后续工具仍会继续跑，直到自然结束或 20 轮上限。
+// 原因：要修需要把 AbortSignal 贯穿 SDK 调用与子进程树，改动远大于本 Demo 的收益。
 function handleChat(protocol: Protocol) {
   return async (req: express.Request, res: express.Response) => {
     const { baseUrl, apiKey, model, text, stream, sessionId, maxTokens } = req.body as {
@@ -29,6 +32,9 @@ function handleChat(protocol: Protocol) {
       maxTokens?: number
     }
     // 校验必填字段
+    // 【已知取舍 · Demo 不修】maxTokens 只判「有没有值」，不校验正整数与合理上限：
+    // 直接调接口传负数 / NaN / 极大值，最终由 SDK 或上游报错。
+    // 原因：正常 UI 的 InputNumber 已限制 min=1，只有手工构造请求才会触发。
     if (!baseUrl || !apiKey || !model || !text || !sessionId) {
       res.status(400).json({ error: 'missing required fields: baseUrl/apiKey/model/text/sessionId' })
       return
@@ -115,6 +121,9 @@ export function buildApp(): express.Express {
 
   // ---- 日志接口 ----
   // SSE 长连接：实时推送日志增量（所有会话的事件都推，前端自己过滤 sessionId）
+  // 【已知取舍 · Demo 不修】广播给所有订阅者，payload 里带完整请求头（含 API Key）与响应正文；
+  // 多标签页时每页都会收到其他会话的敏感内容，再由前端按 sessionId 丢弃。
+  // 原因：Demo 通常只开一个页面；要修可让订阅时带上 sessionId，由服务端只推该会话。
   // 注意：必须注册在 /api/logs/:sessionId 之前，否则 "stream" 会被当成 sessionId 参数
   app.get('/api/logs/stream', (req, res) => {
     res.setHeader('content-type', 'text/event-stream')
